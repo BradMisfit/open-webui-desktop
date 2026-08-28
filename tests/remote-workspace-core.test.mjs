@@ -161,6 +161,39 @@ test('a saved unpaired device ID retries pair rather than attempting authenticat
   assert.equal(frames[0].type, 'pair')
 })
 
+test('an enrolled Desktop authenticates a fresh Browse launch with its correlation ID', async () => {
+  const root = temporaryRoot()
+  const configPath = path.join(root, 'config.json')
+  const frames = []
+  const socket = {
+    onmessage: null,
+    send(frame) {
+      frames.push(JSON.parse(frame))
+      const request = JSON.parse(frame)
+      if (request.type === 'authenticate') {
+        setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'authenticated', device_id: request.device_id }) }), 0)
+      }
+    },
+    close() {}
+  }
+  class PickerClient extends RemoteWorkspaceClient {
+    async selectFolder() { return root }
+  }
+  const client = new PickerClient({
+    configPath,
+    connectSocket: async () => {
+      setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'challenge', nonce: Buffer.alloc(32).toString('base64url'), protocol: REMOTE_WORKSPACE_PROTOCOL }) }), 0)
+      return socket
+    }
+  })
+  client.deviceId()
+  client.config.enrolled_endpoint = 'wss://work.example.test/v1/remote-workspaces/client/connect'
+  client.save()
+  await client.browse({ launch_url: launch() })
+  assert.equal(frames[0].type, 'authenticate')
+  assert.equal(frames[0].helper_launch_id, 'rwp_' + 'a'.repeat(32))
+})
+
 test('workspace bridge failures return a bounded typed response to the guest', () => {
   const source = fs.readFileSync(path.join(process.cwd(), 'src/renderer/src/lib/components/Main/Connections/Content.svelte'), 'utf8')
   const main = fs.readFileSync(path.join(process.cwd(), 'src/main/index.ts'), 'utf8')

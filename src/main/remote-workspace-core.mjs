@@ -237,8 +237,12 @@ export class RemoteWorkspaceClient {
     const grant = this.addWorkspace(path.basename(selected) || 'Workspace', selected, capabilitiesForPreset(request.preset))
     this.config.endpoint = request.endpoint
     this.save()
+    // Every Browse launch needs a server-side correlation result, even when
+    // this Desktop is already enrolled and therefore authenticates instead of
+    // consuming the fresh one-time pairing code.  The pair ID is opaque to the
+    // guest and is used only by the relay to acknowledge this registration.
     const pairing = this.config.enrolled_endpoint === request.endpoint
-      ? {}
+      ? { helperLaunchId: request.pairId }
       : { pairId: request.pairId, code: request.code, helperLaunchId: request.pairId }
     // The native picker is intentionally outside any transport deadline: a
     // person may take as long as needed to choose a folder.  Once selection is
