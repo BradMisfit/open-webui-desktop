@@ -105,6 +105,13 @@ test('Desktop pair and reconnect frames identify the protocol-bearing client', a
   assert.equal(pair.protocol, REMOTE_WORKSPACE_PROTOCOL)
 })
 
+test('workspace bridge failures return a bounded typed response to the guest', () => {
+  const source = fs.readFileSync(path.join(process.cwd(), 'src/renderer/src/lib/components/Main/Connections/Content.svelte'), 'utf8')
+  assert.match(source, /DESKTOP_WORKSPACE_UNAVAILABLE/)
+  assert.match(source, /requestData\.type\.startsWith\('workspace:'\)/)
+  assert.match(source, /_responseId: requestData\._requestId/)
+})
+
 test('a failed first enrollment remains retryable and does not mistake a saved device ID for trust', () => {
   const root = temporaryRoot()
   const client = new RemoteWorkspaceClient({ configPath: path.join(root, 'config.json') })

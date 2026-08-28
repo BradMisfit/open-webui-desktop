@@ -225,6 +225,21 @@
               }
             } catch (e) {
               console.error('webview:send handler error:', e)
+              // Return a bounded typed failure for the two allowlisted
+              // workspace requests.  The guest never receives an exception
+              // object, local path, or implementation details.
+              if (requestData._requestId && typeof requestData.type === 'string' && requestData.type.startsWith('workspace:')) {
+                const failure = e as { code?: unknown; detail?: unknown; message?: unknown }
+                wv.send('desktop:response', {
+                  _responseId: requestData._requestId,
+                  data: {
+                    code: typeof failure?.code === 'string' ? failure.code : 'DESKTOP_WORKSPACE_UNAVAILABLE',
+                    detail: typeof failure?.detail === 'string'
+                      ? failure.detail
+                      : (typeof failure?.message === 'string' ? failure.message : 'Desktop workspace operation failed')
+                  }
+                })
+              }
             }
           } else if (event.channel === 'webview:load') {
             const page = event.args?.[0]
