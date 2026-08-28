@@ -201,7 +201,21 @@
             }
 
             try {
-              const response = await window.electronAPI[requestData.type]?.(requestData)
+              // Workspace requests are a deliberate, explicit guest API.
+              // They cannot fall through to the broad Desktop renderer API:
+              // only a signed one-time launch can start the native picker and
+              // all subsequent local operations use the paired relay.
+              const workspaceHandlers: Record<string, (request: any) => Promise<any>> = {
+                'workspace:browse': (request) => window.electronAPI.workspaceBrowse({
+                  launch_url: String(request?.launch_url ?? '')
+                }),
+                'workspace:status': () => window.electronAPI.workspaceStatus()
+              }
+              const response = requestData.type?.startsWith('workspace:')
+                ? await (workspaceHandlers[requestData.type]
+                    ? workspaceHandlers[requestData.type](requestData)
+                    : Promise.reject(new Error('unsupported workspace request')))
+                : await window.electronAPI[requestData.type]?.(requestData)
               if (requestData._requestId) {
                 wv.send('desktop:response', {
                   _responseId: requestData._requestId,

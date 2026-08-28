@@ -176,6 +176,12 @@ const api = {
   validateUrl: (url: string) => ipcRenderer.invoke('validate:url', url),
   selectFolder: () => ipcRenderer.invoke('dialog:selectFolder'),
 
+  // Remote Workspace — only high-level opaque flows are exposed to the
+  // desktop renderer. The remote webview cannot obtain local paths, keys, or
+  // direct filesystem/process handles from this API.
+  workspaceBrowse: (request: { launch_url?: string }) => ipcRenderer.invoke('workspace:browse', request),
+  workspaceStatus: () => ipcRenderer.invoke('workspace:status'),
+
   // Updater
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   downloadUpdate: () => ipcRenderer.invoke('updater:download'),

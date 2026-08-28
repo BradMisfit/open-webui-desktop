@@ -83,6 +83,7 @@ import {
 } from './utils/huggingface'
 
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
+import { createDesktopRemoteWorkspaceService } from './remote-workspace'
 
 import log from 'electron-log'
 log.transports.file.resolvePathFn = () => getLogFilePath('main')
@@ -162,6 +163,7 @@ let SERVER_REACHABLE = false
 let SERVER_PID: number | null = null
 let AUTH_TOKEN: string | null = null
 let voiceInputRecording = false
+let remoteWorkspaceService: ReturnType<typeof createDesktopRemoteWorkspaceService> | null = null
 
 // ─── Global Shortcuts ───────────────────────────────────
 
@@ -1198,6 +1200,11 @@ if (!gotTheLock) {
 
   app.whenReady().then(async () => {
     CONFIG = await getConfig()
+    remoteWorkspaceService = createDesktopRemoteWorkspaceService((state) => {
+      // The Desktop renderer can surface connection state, but the guest page
+      // only receives this bounded opaque metadata through workspace:status.
+      sendToRenderer('workspace:status', state)
+    })
     loadSpotlightPosition()
     log.info('Config:', CONFIG)
 
@@ -1394,6 +1401,18 @@ if (!gotTheLock) {
     // ─── IPC Handlers ─────────────────────────────────
 
     ipcMain.handle('get:version', () => app.getVersion())
+
+    // Remote Workspace guest operations are intentionally narrow.  The
+    // browser-facing content preload can request only these high-level flows;
+    // all local filesystem and process operations travel over the existing
+    // authenticated outbound Workspace relay, never through the webview IPC.
+    ipcMain.handle('workspace:browse', async (_event, request: { launch_url?: string } = {}) => {
+      if (!remoteWorkspaceService) throw new Error('Remote Workspace service is unavailable')
+      return remoteWorkspaceService.browse({ launch_url: String(request.launch_url || '') })
+    })
+    ipcMain.handle('workspace:status', () => remoteWorkspaceService?.publicStatus() ?? {
+      protocol: 1, device_id: null, connected: false, workspaces: []
+    })
 
     ipcMain.handle('app:info', () => ({
       version: app.getVersion(),
