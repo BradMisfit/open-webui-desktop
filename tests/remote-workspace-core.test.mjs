@@ -105,11 +105,70 @@ test('Desktop pair and reconnect frames identify the protocol-bearing client', a
   assert.equal(pair.protocol, REMOTE_WORKSPACE_PROTOCOL)
 })
 
+test('a post-picker relay rejection is returned as its server typed error', async () => {
+  const root = temporaryRoot()
+  const frames = []
+  const socket = {
+    onmessage: null,
+    onclose: null,
+    send(frame) {
+      frames.push(JSON.parse(frame))
+      setTimeout(() => socket.onmessage?.({ data: JSON.stringify({
+        type: 'error', code: 'DESKTOP_UPDATE_REQUIRED', detail: 'Desktop update required to use Remote Workspaces.'
+      }) }), 0)
+    },
+    close() {}
+  }
+  class PickerClient extends RemoteWorkspaceClient {
+    async selectFolder() { return root }
+  }
+  const client = new PickerClient({
+    configPath: path.join(root, 'config.json'),
+    connectSocket: async () => {
+      setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'challenge', nonce: Buffer.alloc(32).toString('base64url'), protocol: REMOTE_WORKSPACE_PROTOCOL }) }), 0)
+      return socket
+    }
+  })
+  await assert.rejects(
+    client.browse({ launch_url: launch() }),
+    (error) => error instanceof RemoteWorkspaceError && error.code === 'DESKTOP_UPDATE_REQUIRED'
+  )
+  assert.equal(frames[0].type, 'pair')
+})
+
+test('a saved unpaired device ID retries pair rather than attempting authentication', async () => {
+  const root = temporaryRoot()
+  const configPath = path.join(root, 'config.json')
+  const frames = []
+  const socket = {
+    onmessage: null,
+    send(frame) {
+      frames.push(JSON.parse(frame))
+      const request = JSON.parse(frame)
+      setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'paired', device_id: request.device_id }) }), 0)
+    },
+    close() {}
+  }
+  const client = new RemoteWorkspaceClient({
+    configPath,
+    connectSocket: async () => {
+      setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'challenge', nonce: Buffer.alloc(32).toString('base64url'), protocol: REMOTE_WORKSPACE_PROTOCOL }) }), 0)
+      return socket
+    }
+  })
+  client.deviceId()
+  await client.open('wss://example.test/relay', { pairId: 'rwp_' + 'a'.repeat(32), code: 'x'.repeat(20) })
+  assert.equal(frames[0].type, 'pair')
+})
+
 test('workspace bridge failures return a bounded typed response to the guest', () => {
   const source = fs.readFileSync(path.join(process.cwd(), 'src/renderer/src/lib/components/Main/Connections/Content.svelte'), 'utf8')
+  const main = fs.readFileSync(path.join(process.cwd(), 'src/main/index.ts'), 'utf8')
   assert.match(source, /DESKTOP_WORKSPACE_UNAVAILABLE/)
   assert.match(source, /requestData\.type\.startsWith\('workspace:'\)/)
   assert.match(source, /_responseId: requestData\._requestId/)
+  assert.match(main, /workspaceBridgeFailure/)
+  assert.match(main, /return workspaceBridgeFailure\(error\?\.code\)/)
 })
 
 test('a failed first enrollment remains retryable and does not mistake a saved device ID for trust', () => {

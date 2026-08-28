@@ -240,6 +240,10 @@ export class RemoteWorkspaceClient {
     const pairing = this.config.enrolled_endpoint === request.endpoint
       ? {}
       : { pairId: request.pairId, code: request.code, helperLaunchId: request.pairId }
+    // The native picker is intentionally outside any transport deadline: a
+    // person may take as long as needed to choose a folder.  Once selection is
+    // complete, however, the relay handshake is bounded and failures are
+    // returned as typed RemoteWorkspaceError values to the guest bridge.
     await this.connect(request.endpoint, pairing)
     return { cancelled: false, workspace: publicGrant(grant), ...this.publicStatus() }
   }
@@ -266,7 +270,10 @@ export class RemoteWorkspaceClient {
         throw new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay did not provide a valid challenge')
       }
       this.assertProtocol(challenge.protocol)
-      const firstUse = Boolean(pairId && code && !this.config.device_id)
+      // Identity generation happens before the first pair frame.  A failed
+      // first attempt can therefore leave a device ID on disk; enrollment is
+      // still incomplete until the server has accepted the pair frame.
+      const firstUse = Boolean(pairId && code && !this.config.enrolled_endpoint)
       if (firstUse) {
         sendJson(socket, {
           type: 'pair', pair_id: pairId, code, device_id: this.deviceId(),
@@ -285,6 +292,12 @@ export class RemoteWorkspaceClient {
         })
       }
       const authenticated = await receiveJson(socket)
+      if (authenticated?.type === 'error') {
+        throw new RemoteWorkspaceError(
+          typeof authenticated.code === 'string' ? authenticated.code : 'CLIENT_DISCONNECTED',
+          typeof authenticated.detail === 'string' ? authenticated.detail : 'the Work Agent relay rejected this Desktop client'
+        )
+      }
       if (!['paired', 'authenticated'].includes(authenticated?.type) || authenticated.device_id !== this.deviceId()) {
         throw new RemoteWorkspaceError('PERMISSION_DENIED', authenticated?.detail || 'the Work Agent relay rejected this Desktop client')
       }
@@ -572,7 +585,35 @@ const splitCommand = (command) => {
 }
 const terminateProcess = (child) => { if (!child || child.exitCode !== null) return; try { if (process.platform === 'win32') child.kill(); else process.kill(-child.pid, 'SIGTERM') } catch { try { child.kill('SIGKILL') } catch {} } }
 const quickGitTree = (cwd) => new Promise((resolve) => { const child = spawn('git', ['rev-parse', 'HEAD^{tree}'], { cwd, shell: false, stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true }); let text = ''; child.stdout.on('data', (chunk) => { text += chunk }); child.on('close', () => resolve(text.trim())); child.on('error', () => resolve('')) })
-const defaultSocket = (endpoint) => new Promise((resolve, reject) => { const socket = new WebSocket(endpoint); socket.onopen = () => resolve(socket); socket.onerror = () => reject(new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay could not be reached')) })
-const receiveJson = (socket) => new Promise((resolve, reject) => { const timeout = setTimeout(() => reject(new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay timed out')), 15000); const previous = socket.onmessage; socket.onmessage = async (event) => { clearTimeout(timeout); socket.onmessage = previous; try { resolve(JSON.parse(await messageText(event.data))) } catch { reject(new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay sent invalid JSON')) } } })
+const defaultSocket = (endpoint) => new Promise((resolve, reject) => {
+  const socket = new WebSocket(endpoint)
+  const timeout = setTimeout(() => {
+    try { socket.close() } catch {}
+    reject(new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay connection timed out'))
+  }, 15000)
+  socket.onopen = () => { clearTimeout(timeout); resolve(socket) }
+  socket.onerror = () => { clearTimeout(timeout); reject(new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay could not be reached')) }
+})
+const receiveJson = (socket) => new Promise((resolve, reject) => {
+  const clear = () => clearTimeout(timeout)
+  const timeout = setTimeout(() => {
+    socket.onmessage = previous
+    reject(new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay timed out'))
+  }, 15000)
+  const previous = socket.onmessage
+  const previousClose = socket.onclose
+  socket.onmessage = async (event) => {
+    clear()
+    socket.onmessage = previous
+    socket.onclose = previousClose
+    try { resolve(JSON.parse(await messageText(event.data))) } catch { reject(new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay sent invalid JSON')) }
+  }
+  socket.onclose = () => {
+    clear()
+    socket.onmessage = previous
+    socket.onclose = previousClose
+    reject(new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay disconnected during authentication'))
+  }
+})
 const sendJson = (socket, value) => socket.send(JSON.stringify(value))
 const messageText = async (data) => typeof data === 'string' ? data : Buffer.isBuffer(data) ? data.toString('utf8') : data?.text ? data.text() : String(data)

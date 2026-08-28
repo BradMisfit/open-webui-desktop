@@ -165,6 +165,23 @@ let AUTH_TOKEN: string | null = null
 let voiceInputRecording = false
 let remoteWorkspaceService: ReturnType<typeof createDesktopRemoteWorkspaceService> | null = null
 
+// These are deliberately generic: a remote guest is told what class of
+// action to take, never a local path, socket URL, key, or Electron error.
+const workspaceBridgeFailure = (value: unknown) => {
+  const code = typeof value === 'string' ? value : 'DESKTOP_WORKSPACE_UNAVAILABLE'
+  const details: Record<string, string> = {
+    DESKTOP_UPDATE_REQUIRED: 'Desktop update required to use Remote Workspaces.',
+    ENDPOINT_MISMATCH: 'This Desktop client is enrolled with a different Work Agent server.',
+    FOLDER_PICKER_UNAVAILABLE: 'The native folder picker is unavailable.',
+    INVALID_HELPER_URL: 'The workspace launch request is invalid. Try Browse again.',
+    CLIENT_DISCONNECTED: 'The Work Agent server could not be reached. Check the connection and try Browse again.',
+    PERMISSION_DENIED: 'The Work Agent server did not authorize this workspace request.',
+    WORKSPACE_CONFIGURATION_INVALID: 'The local Desktop workspace configuration is invalid.',
+    DESKTOP_WORKSPACE_UNAVAILABLE: 'Desktop Remote Workspace is unavailable. Try Browse again.'
+  }
+  return { code: Object.hasOwn(details, code) ? code : 'DESKTOP_WORKSPACE_UNAVAILABLE', detail: details[code] || details.DESKTOP_WORKSPACE_UNAVAILABLE }
+}
+
 // ─── Global Shortcuts ───────────────────────────────────
 
 /**
@@ -1407,8 +1424,15 @@ if (!gotTheLock) {
     // all local filesystem and process operations travel over the existing
     // authenticated outbound Workspace relay, never through the webview IPC.
     ipcMain.handle('workspace:browse', async (_event, request: { launch_url?: string } = {}) => {
-      if (!remoteWorkspaceService) throw new Error('Remote Workspace service is unavailable')
-      return remoteWorkspaceService.browse({ launch_url: String(request.launch_url || '') })
+      if (!remoteWorkspaceService) return workspaceBridgeFailure('DESKTOP_WORKSPACE_UNAVAILABLE')
+      try {
+        return await remoteWorkspaceService.browse({ launch_url: String(request.launch_url || '') })
+      } catch (error) {
+        // Electron serializes rejected IPC errors inconsistently across
+        // platforms. Resolve a bounded typed result instead, so the remote
+        // guest always receives its correlation response after the picker.
+        return workspaceBridgeFailure(error?.code)
+      }
     })
     ipcMain.handle('workspace:status', () => remoteWorkspaceService?.publicStatus() ?? {
       protocol: 1, device_id: null, connected: false, workspaces: []
