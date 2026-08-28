@@ -211,7 +211,8 @@
                 }),
                 'workspace:status': () => window.electronAPI.workspaceStatus()
               }
-              const response = requestData.type?.startsWith('workspace:')
+              const isWorkspaceRequest = typeof requestData.type === 'string' && requestData.type.startsWith('workspace:')
+              const response = isWorkspaceRequest
                 ? await (workspaceHandlers[requestData.type]
                     ? workspaceHandlers[requestData.type](requestData)
                     : Promise.reject(new Error('unsupported workspace request')))

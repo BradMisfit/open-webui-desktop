@@ -80,6 +80,31 @@ test('protocol mismatch fails clearly before any workspace operation', () => {
   assert.throws(() => client.assertProtocol(2), (error) => error instanceof RemoteWorkspaceError && error.code === 'DESKTOP_UPDATE_REQUIRED')
 })
 
+test('Desktop pair and reconnect frames identify the protocol-bearing client', async () => {
+  const configPath = path.join(temporaryRoot(), 'config.json')
+  const frames = []
+  const socket = {
+    onmessage: null,
+    send(frame) {
+      frames.push(frame)
+      const request = JSON.parse(frame)
+      if (request.type === 'pair') setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'paired', device_id: request.device_id }) }), 0)
+    },
+    close() {}
+  }
+  const client = new RemoteWorkspaceClient({
+    configPath,
+    connectSocket: async () => {
+      setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'challenge', nonce: Buffer.alloc(32).toString('base64url'), protocol: REMOTE_WORKSPACE_PROTOCOL }) }), 0)
+      return socket
+    }
+  })
+  await client.open('wss://example.test/relay', { pairId: 'rwp_' + 'a'.repeat(32), code: 'x'.repeat(20) })
+  const pair = JSON.parse(frames[0])
+  assert.equal(pair.client_kind, 'open-webui-desktop')
+  assert.equal(pair.protocol, REMOTE_WORKSPACE_PROTOCOL)
+})
+
 test('a failed first enrollment remains retryable and does not mistake a saved device ID for trust', () => {
   const root = temporaryRoot()
   const client = new RemoteWorkspaceClient({ configPath: path.join(root, 'config.json') })

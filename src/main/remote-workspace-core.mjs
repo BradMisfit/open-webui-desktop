@@ -13,6 +13,7 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 
 export const REMOTE_WORKSPACE_PROTOCOL = 1
+export const REMOTE_WORKSPACE_DESKTOP_CLIENT_KIND = 'open-webui-desktop'
 
 export class RemoteWorkspaceError extends Error {
   constructor(code, detail) {
@@ -271,14 +272,16 @@ export class RemoteWorkspaceClient {
           type: 'pair', pair_id: pairId, code, device_id: this.deviceId(),
           display_name: this.config.display_name || this.deviceId(),
           os_name: this.platform === 'win32' ? 'windows' : 'linux', public_key: this.publicKey(),
-          helper_launch_id: helperLaunchId || pairId, protocol: REMOTE_WORKSPACE_PROTOCOL
+          helper_launch_id: helperLaunchId || pairId, protocol: REMOTE_WORKSPACE_PROTOCOL,
+          client_kind: REMOTE_WORKSPACE_DESKTOP_CLIENT_KIND
         })
       } else {
         const nonce = Buffer.from(challenge.nonce, 'base64url')
         sendJson(socket, {
           type: 'authenticate', device_id: this.deviceId(),
           signature: base64url(crypto.sign(null, nonce, this.ensureKey())),
-          helper_launch_id: helperLaunchId, protocol: REMOTE_WORKSPACE_PROTOCOL
+          helper_launch_id: helperLaunchId, protocol: REMOTE_WORKSPACE_PROTOCOL,
+          client_kind: REMOTE_WORKSPACE_DESKTOP_CLIENT_KIND
         })
       }
       const authenticated = await receiveJson(socket)
