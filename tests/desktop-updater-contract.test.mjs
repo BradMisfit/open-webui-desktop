@@ -108,9 +108,16 @@ test('release workflow is manual, validates artifacts, and publishes only a draf
 
 test('Remote Workspace bridge and protocol compatibility remain isolated from updater work', () => {
   const preload = read('src/preload/index.ts')
+  const main = read('src/main/index.ts')
+  const content = read('src/renderer/src/lib/components/Main/Connections/Content.svelte')
   const core = read('src/main/remote-workspace-core.mjs')
   assert.match(preload, /workspaceBrowse: \(request: \{ launch_url\?: string \}\)/)
   assert.match(preload, /workspaceStatus: \(\) => ipcRenderer\.invoke\('workspace:status'\)/)
+  assert.match(preload, /githubAuthorizeDevice: \(verificationUri: string\) => ipcRenderer\.invoke\('github:authorize-device', verificationUri\)/)
+  assert.match(main, /verificationUri !== 'https:\/\/github\.com\/login\/device'/)
+  assert.match(main, /shell\.openExternal\(verificationUri\)/)
+  assert.match(content, /'github:authorize-device': \(request\) => window\.electronAPI\.githubAuthorizeDevice/)
+  assert.doesNotMatch(main, /github:authorize-device[\s\S]{0,400}openExternal\(url\)/)
   assert.match(core, /DESKTOP_UPDATE_REQUIRED/)
   assert.doesNotMatch(preload, /workspace[A-Za-z]*:\s*\([^)]*path/)
 })

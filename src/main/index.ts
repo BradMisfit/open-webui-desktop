@@ -1437,6 +1437,21 @@ if (!gotTheLock) {
     ipcMain.handle('workspace:status', () => remoteWorkspaceService?.publicStatus() ?? {
       protocol: 1, device_id: null, connected: false, workspaces: []
     })
+    // GitHub Device Flow navigation is deliberately separate from the broad
+    // Desktop renderer API. The embedded remote page can request one exact
+    // GitHub verification URL; it cannot turn this into arbitrary external
+    // navigation or gain access to OAuth device/token material.
+    ipcMain.handle('github:authorize-device', async (_event, verificationUri: string) => {
+      if (verificationUri !== 'https://github.com/login/device') {
+        return { code: 'GITHUB_DEVICE_URI_INVALID', detail: 'GitHub verification URL is invalid' }
+      }
+      try {
+        await shell.openExternal(verificationUri)
+        return { opened: true }
+      } catch (_error) {
+        return { code: 'GITHUB_DEVICE_BROWSER_FAILED', detail: 'Desktop could not open GitHub' }
+      }
+    })
 
     ipcMain.handle('app:info', () => ({
       version: app.getVersion(),

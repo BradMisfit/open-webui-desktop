@@ -209,13 +209,20 @@
                 'workspace:browse': (request) => window.electronAPI.workspaceBrowse({
                   launch_url: String(request?.launch_url ?? '')
                 }),
-                'workspace:status': () => window.electronAPI.workspaceStatus()
+                'workspace:status': () => window.electronAPI.workspaceStatus(),
+                // OAuth Device Flow may open only GitHub's fixed verification
+                // page. The webview never receives a general shell/open URL
+                // operation, device code, or access token.
+                'github:authorize-device': (request) => window.electronAPI.githubAuthorizeDevice(
+                  String(request?.verification_uri ?? '')
+                )
               }
-              const isWorkspaceRequest = typeof requestData.type === 'string' && requestData.type.startsWith('workspace:')
-              const response = isWorkspaceRequest
+              const isRestrictedGuestRequest = typeof requestData.type === 'string'
+                && (requestData.type.startsWith('workspace:') || requestData.type === 'github:authorize-device')
+              const response = isRestrictedGuestRequest
                 ? await (workspaceHandlers[requestData.type]
                     ? workspaceHandlers[requestData.type](requestData)
-                    : Promise.reject(new Error('unsupported workspace request')))
+                    : Promise.reject(new Error('unsupported restricted guest request')))
                 : await window.electronAPI[requestData.type]?.(requestData)
               if (requestData._requestId) {
                 wv.send('desktop:response', {
@@ -225,10 +232,11 @@
               }
             } catch (e) {
               console.error('webview:send handler error:', e)
-              // Return a bounded typed failure for the two allowlisted
-              // workspace requests.  The guest never receives an exception
+              // Return a bounded typed failure for allowlisted restricted
+              // requests. The guest never receives an exception
               // object, local path, or implementation details.
-              if (requestData._requestId && typeof requestData.type === 'string' && requestData.type.startsWith('workspace:')) {
+              if (requestData._requestId && typeof requestData.type === 'string'
+                && (requestData.type.startsWith('workspace:') || requestData.type === 'github:authorize-device')) {
                 const failure = e as { code?: unknown; detail?: unknown; message?: unknown }
                 wv.send('desktop:response', {
                   _responseId: requestData._requestId,

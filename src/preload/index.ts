@@ -181,6 +181,7 @@ const api = {
   // direct filesystem/process handles from this API.
   workspaceBrowse: (request: { launch_url?: string }) => ipcRenderer.invoke('workspace:browse', request),
   workspaceStatus: () => ipcRenderer.invoke('workspace:status'),
+  githubAuthorizeDevice: (verificationUri: string) => ipcRenderer.invoke('github:authorize-device', verificationUri),
 
   // Updater
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
