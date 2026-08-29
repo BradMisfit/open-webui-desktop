@@ -1,4 +1,4 @@
 provider: github
-owner: open-webui
-repo: desktop
+owner: BradMisfit
+repo: open-webui-desktop
 updaterCacheDirName: desktop-updater

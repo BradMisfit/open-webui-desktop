@@ -1,9 +1,17 @@
-name: Build and Release Electron App (electron-builder)
+name: Build Custom Desktop Release
 
 on:
-    push:
-        branches:
-            - release
+    workflow_dispatch:
+        inputs:
+            release_version:
+                description: Exact package.json version to build (for example 0.0.21-bradmisfit.1)
+                required: true
+                type: string
+            create_draft_release:
+                description: Upload validated artifacts to a draft in the controlled public release feed
+                required: true
+                default: false
+                type: boolean
 
 jobs:
     compile:
@@ -199,11 +207,10 @@ jobs:
                   if-no-files-found: warn
 
     release:
-        name: Create GitHub Release
+        name: Create controlled updater release draft
         needs: package
         if: >-
-            github.event_name == 'push' &&
-            github.ref == 'refs/heads/release' &&
+            inputs.create_draft_release &&
             !cancelled() &&
             needs.package.result != 'failure'
         runs-on: ubuntu-latest
@@ -216,12 +223,21 @@ jobs:
                   sparse-checkout: |
                       package.json
                       CHANGELOG.md
+                      build/verify-updater-release.mjs
                   sparse-checkout-cone-mode: false
 
             - name: Get version from package.json
               id: version
               run: |
                   VERSION=$(node -p "require('./package.json').version")
+                  if [ "$VERSION" != "${{ inputs.release_version }}" ]; then
+                    echo "Requested release version does not match package.json: $VERSION" >&2
+                    exit 1
+                  fi
+                  if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+-bradmisfit\.[0-9]+$ ]]; then
+                    echo "Custom Desktop version must use N.N.N-bradmisfit.N" >&2
+                    exit 1
+                  fi
                   echo "version=$VERSION" >> $GITHUB_OUTPUT
                   echo "Release version: $VERSION"
 
@@ -396,15 +412,37 @@ jobs:
                     }
                   "
 
-            - name: Create Release
+            - name: Verify Windows updater manifest and artifacts
+              run: |
+                  node build/verify-updater-release.mjs \
+                    --manifest windows-latest-x64/latest.yml \
+                    --artifact-directory windows-latest-x64 \
+                    --version "${{ steps.version.outputs.version }}"
+
+            - name: Create build provenance
+              run: |
+                  cat > release-provenance.json <<EOF
+                  {
+                    "application": "Open WebUI Desktop",
+                    "version": "${{ steps.version.outputs.version }}",
+                    "source_commit": "${{ github.sha }}",
+                    "remote_workspace_protocol": 1,
+                    "app_id": "com.openwebui.desktop"
+                  }
+                  EOF
+
+            - name: Create draft release in the controlled update feed
               uses: softprops/action-gh-release@v2
               env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  # This CI-only credential writes artifacts to the public feed.
+                  # It is never present in the Desktop application or updater.
+                  GITHUB_TOKEN: ${{ secrets.RELEASE_FEED_TOKEN }}
               with:
+                  repository: BradMisfit/open-webui-desktop
                   tag_name: v${{ steps.version.outputs.version }}
                   name: v${{ steps.version.outputs.version }}
                   body_path: /tmp/release_notes.md
-                  draft: false
+                  draft: true
                   prerelease: false
                   files: |
                       windows-*-*/*.exe
@@ -422,3 +460,4 @@ jobs:
                       ubuntu-*-*/*.flatpak
                       ubuntu-*-*/*.tar.gz
                       ubuntu-*-*/latest*.yml
+                      release-provenance.json

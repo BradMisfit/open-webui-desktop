@@ -176,7 +176,9 @@
   }
 
   const openGithub = () => {
-    window.electronAPI?.openInBrowser?.('https://github.com/open-webui/desktop')
+    // The Desktop updater and its public release page intentionally use the
+    // controlled custom feed, not vanilla upstream releases.
+    window.electronAPI?.openInBrowser?.('https://github.com/BradMisfit/open-webui-desktop/releases')
   }
 
   const handleCheck = async () => {

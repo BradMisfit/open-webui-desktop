@@ -1,6 +1,6 @@
 {
   "name": "open-webui",
-  "version": "0.0.20",
+  "version": "0.0.21-bradmisfit.1",
   "license": "AGPL-3.0",
   "description": "Open WebUI Desktop",
   "main": "./out/main/index.js",
@@ -20,7 +20,9 @@
     "build:win": "npm run build && electron-builder --win",
     "build:mac": "npm run build && electron-builder --mac",
     "build:linux": "npm run build && electron-builder --linux",
-    "test:remote-workspace": "node --test tests/remote-workspace-core.test.mjs"
+    "test:remote-workspace": "node --test tests/remote-workspace-core.test.mjs",
+    "test:updater": "node --test tests/desktop-updater-contract.test.mjs",
+    "verify:updater-release": "node build/verify-updater-release.mjs"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",

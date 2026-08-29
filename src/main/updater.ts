@@ -4,6 +4,14 @@ import { app, BrowserWindow } from 'electron'
 
 let mainWin: BrowserWindow | null = null
 
+// This is deliberately compiled into the Desktop main process.  No renderer,
+// loaded Open WebUI page, or model input can supply an update location.
+export const CUSTOM_UPDATE_FEED = Object.freeze({
+  provider: 'github' as const,
+  owner: 'BradMisfit',
+  repo: 'open-webui-desktop'
+})
+
 const send = (type: string, data?: any): void => {
   mainWin?.webContents.send('main:data', { type, data })
 }
@@ -14,6 +22,7 @@ export function initUpdater(window: BrowserWindow): void {
   autoUpdater.logger = log
   autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.setFeedURL(CUSTOM_UPDATE_FEED)
 
   autoUpdater.on('checking-for-update', () => {
     send('update:checking')
