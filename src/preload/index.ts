@@ -214,7 +214,8 @@ const api = {
   securityInterceptSet: (opts: any) => ipcRenderer.invoke('security:intercept:set', opts),
   securityInterceptGet: () => ipcRenderer.invoke('security:intercept:get'),
   securityInterceptDecide: (input: any) => ipcRenderer.invoke('security:intercept:decide', input),
-  securityRepeaterSend: (req: any) => ipcRenderer.invoke('security:repeater:send', req)
+  securityRepeaterSend: (req: any) => ipcRenderer.invoke('security:repeater:send', req),
+  securityWsSend: (req: any) => ipcRenderer.invoke('security:ws:send', req)
 }
 
 if (process.contextIsolated) {

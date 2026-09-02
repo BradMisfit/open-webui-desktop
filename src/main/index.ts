@@ -104,6 +104,7 @@ import {
   setSecurityEventPusher
 } from './security/captureEngine'
 import { sendRepeaterRequest } from './security/repeater'
+import { sendWsMessage } from './security/wsRepeater'
 
 import log from 'electron-log'
 log.transports.file.resolvePathFn = () => getLogFilePath('main')
@@ -1574,6 +1575,7 @@ if (!gotTheLock) {
       const browserSession = session.fromPartition('persist:browser-workspace')
       return await sendRepeaterRequest(browserSession, req || {})
     })
+    ipcMain.handle('security:ws:send', async (_e, req) => await sendWsMessage(req || {}))
     // Push intercept-paused events from the capture engine to the renderer, which
     // forwards them to the visible OWUI guest (Content.svelte onData handler).
     setSecurityEventPusher((data) => sendToRenderer('security:event', data))

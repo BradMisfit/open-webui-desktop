@@ -304,6 +304,9 @@
                   case 'security:repeater:send':
                     response = await api.securityRepeaterSend?.(d)
                     break
+                  case 'security:ws:send':
+                    response = await api.securityWsSend?.(d)
+                    break
                   case 'security:openDevTools': {
                     // The guest knows only the tabId; resolve it to the live
                     // WebContents id here (main opens DevTools on that page).
