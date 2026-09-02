@@ -307,6 +307,33 @@
                   case 'security:ws:send':
                     response = await api.securityWsSend?.(d)
                     break
+                  case 'security:passive:scan':
+                    response = await api.securityPassiveScan?.(d)
+                    break
+                  case 'security:findings:list':
+                    response = await api.securityFindingsList?.()
+                    break
+                  case 'security:findings:add':
+                    response = await api.securityFindingsAdd?.(d)
+                    break
+                  case 'security:findings:update':
+                    response = await api.securityFindingsUpdate?.(String(d.id ?? ''), d.patch ?? {})
+                    break
+                  case 'security:findings:delete':
+                    response = await api.securityFindingsDelete?.(String(d.id ?? ''))
+                    break
+                  case 'security:findings:clear':
+                    response = await api.securityFindingsClear?.()
+                    break
+                  case 'security:report':
+                    response = await api.securityReport?.(d)
+                    break
+                  case 'security:fuzz:run':
+                    response = await api.securityFuzzRun?.(d.request ?? {}, d.config ?? {})
+                    break
+                  case 'security:fuzz:cancel':
+                    response = await api.securityFuzzCancel?.(String(d.jobId ?? ''))
+                    break
                   case 'security:openDevTools': {
                     // The guest knows only the tabId; resolve it to the live
                     // WebContents id here (main opens DevTools on that page).

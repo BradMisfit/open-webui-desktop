@@ -847,6 +847,110 @@ export function getSiteMap(opts: { inScopeOnly?: boolean } = {}): object {
   return { hosts: out, hostCount: out.length }
 }
 
+// ── Passive security analysis ────────────────────────────────────────────────
+export interface FindingCandidate {
+  severity: 'info' | 'low' | 'medium' | 'high'
+  category: string
+  title: string
+  method: string
+  url: string
+  host: string
+  path: string
+  description: string
+  remediation: string
+  evidence: string
+  entryId: string
+}
+const SECRET_PATTERNS: Array<{ re: RegExp; name: string }> = [
+  { re: /AKIA[0-9A-Z]{16}/, name: 'AWS access key id' },
+  { re: /AIza[0-9A-Za-z_\-]{35}/, name: 'Google API key' },
+  { re: /gh[pousr]_[0-9A-Za-z]{36,}/, name: 'GitHub token' },
+  { re: /xox[baprs]-[0-9A-Za-z-]{10,}/, name: 'Slack token' },
+  { re: /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/, name: 'private key' },
+  { re: /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/, name: 'JWT' }
+]
+function header(hs: Header[], name: string): string | null {
+  const h = hs.find((x) => x.name.toLowerCase() === name.toLowerCase())
+  return h ? h.value : null
+}
+/** Iterate captured entries and produce passive finding candidates (bounded, in-scope-aware). */
+export function runPassiveScan(opts: { inScopeOnly?: boolean } = {}): FindingCandidate[] {
+  const out: FindingCandidate[] = []
+  const seen = new Set<string>()
+  const add = (e: Entry, f: Omit<FindingCandidate, 'method' | 'url' | 'host' | 'path' | 'entryId'>): void => {
+    const key = `${f.category}|${e.host}|${e.path}|${f.title}`
+    if (seen.has(key)) return
+    seen.add(key)
+    out.push({ ...f, method: e.method, url: e.url, host: e.host, path: e.path, entryId: e.id })
+  }
+  for (const id of order) {
+    const e = entries.get(id)
+    if (!e || e.status == null) continue
+    if (opts.inScopeOnly && !e.inScope) continue
+    const isHttps = e.url.toLowerCase().startsWith('https://')
+    const rh = e.responseHeaders
+    const isDoc = e.mime.includes('html') || e.resourceType === 'document'
+
+    // Security headers (documents)
+    if (isDoc) {
+      if (isHttps && !header(rh, 'strict-transport-security')) {
+        add(e, { severity: 'low', category: 'headers', title: 'Missing HSTS', description: 'The HTTPS response has no Strict-Transport-Security header.', remediation: 'Add Strict-Transport-Security with a long max-age (and preload where appropriate).', evidence: 'no Strict-Transport-Security' })
+      }
+      if (!header(rh, 'content-security-policy')) {
+        add(e, { severity: 'low', category: 'headers', title: 'Missing Content-Security-Policy', description: 'No CSP header; the page has weaker defense against XSS/injection.', remediation: 'Define a restrictive Content-Security-Policy.', evidence: 'no Content-Security-Policy' })
+      }
+      if (!header(rh, 'x-content-type-options')) {
+        add(e, { severity: 'info', category: 'headers', title: 'Missing X-Content-Type-Options', description: 'MIME sniffing is not disabled.', remediation: 'Add X-Content-Type-Options: nosniff.', evidence: 'no X-Content-Type-Options' })
+      }
+      if (!header(rh, 'x-frame-options') && !/frame-ancestors/i.test(header(rh, 'content-security-policy') || '')) {
+        add(e, { severity: 'low', category: 'headers', title: 'Clickjacking: no frame protection', description: 'Neither X-Frame-Options nor CSP frame-ancestors is set.', remediation: 'Set X-Frame-Options: DENY or a CSP frame-ancestors directive.', evidence: 'no framing protection' })
+      }
+    }
+    // CORS
+    const acao = header(rh, 'access-control-allow-origin')
+    if (acao === '*' && header(rh, 'access-control-allow-credentials')?.toLowerCase() === 'true') {
+      add(e, { severity: 'high', category: 'cors', title: 'Permissive CORS with credentials', description: 'Access-Control-Allow-Origin: * together with Allow-Credentials: true exposes authenticated responses to any origin.', remediation: 'Reflect only trusted origins; never combine * with credentials.', evidence: 'ACAO: * + ACAC: true' })
+    } else if (acao === '*') {
+      add(e, { severity: 'info', category: 'cors', title: 'Wildcard CORS', description: 'Access-Control-Allow-Origin: * allows any origin to read the response.', remediation: 'Restrict to trusted origins if the data is not public.', evidence: 'ACAO: *' })
+    }
+    // Cookie flags
+    for (const h of rh) {
+      if (h.name.toLowerCase() !== 'set-cookie') continue
+      const v = h.value
+      const missing: string[] = []
+      if (!/;\s*secure/i.test(v) && isHttps) missing.push('Secure')
+      if (!/;\s*httponly/i.test(v)) missing.push('HttpOnly')
+      if (!/;\s*samesite/i.test(v)) missing.push('SameSite')
+      if (missing.length) {
+        const name = v.split('=')[0]
+        add(e, { severity: 'low', category: 'cookies', title: `Cookie '${name}' missing ${missing.join('/')}`, description: `Set-Cookie for '${name}' lacks ${missing.join(', ')}.`, remediation: 'Set Secure, HttpOnly and an appropriate SameSite on session cookies.', evidence: `missing ${missing.join(', ')}` })
+      }
+    }
+    // Info disclosure
+    const server = header(rh, 'server')
+    if (server && /\d/.test(server)) {
+      add(e, { severity: 'info', category: 'disclosure', title: 'Server version disclosure', description: `Server header reveals software/version: ${server}.`, remediation: 'Suppress or genericize the Server header.', evidence: `Server: ${server}` })
+    }
+    const xpb = header(rh, 'x-powered-by')
+    if (xpb) add(e, { severity: 'info', category: 'disclosure', title: 'X-Powered-By disclosure', description: `X-Powered-By reveals the stack: ${xpb}.`, remediation: 'Remove the X-Powered-By header.', evidence: `X-Powered-By: ${xpb}` })
+
+    // Source map exposure + secrets in body
+    if (e.responseBody.present && e.responseBody.text) {
+      const body = e.responseBody.text
+      if (/\/\/[#@]\s*sourceMappingURL=/.test(body) || e.path.endsWith('.map')) {
+        add(e, { severity: 'info', category: 'sourcemap', title: 'Source map exposed', description: 'A JavaScript source map is reachable, exposing original source.', remediation: 'Do not deploy .map files to production, or restrict access.', evidence: 'sourceMappingURL present' })
+      }
+      for (const p of SECRET_PATTERNS) {
+        if (p.re.test(body)) {
+          add(e, { severity: 'high', category: 'secret', title: `Possible ${p.name} in response`, description: `The response body appears to contain a ${p.name}.`, remediation: 'Remove secrets from client-reachable responses; rotate any exposed credential.', evidence: `${p.name} pattern matched` })
+          break
+        }
+      }
+    }
+  }
+  return out.slice(0, 400)
+}
+
 // ── WebSocket query ──────────────────────────────────────────────────────────
 export function getWebSockets(): object {
   return {

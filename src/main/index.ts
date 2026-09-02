@@ -101,10 +101,14 @@ import {
   setIntercept,
   getIntercept,
   decideIntercept,
-  setSecurityEventPusher
+  setSecurityEventPusher,
+  runPassiveScan
 } from './security/captureEngine'
 import { sendRepeaterRequest } from './security/repeater'
 import { sendWsMessage } from './security/wsRepeater'
+import { runFuzz, cancelFuzz, setFuzzProgressPusher } from './security/fuzzer'
+import { addFindings, addFinding, listFindings, updateFinding, deleteFinding, clearFindings, findingsSummary, generateReport } from './security/findings'
+import { getScope as getScopeState } from './security/scope'
 
 import log from 'electron-log'
 log.transports.file.resolvePathFn = () => getLogFilePath('main')
@@ -1576,6 +1580,27 @@ if (!gotTheLock) {
       return await sendRepeaterRequest(browserSession, req || {})
     })
     ipcMain.handle('security:ws:send', async (_e, req) => await sendWsMessage(req || {}))
+    // Phase D — Passive analysis, Findings, Fuzzer
+    ipcMain.handle('security:passive:scan', (_e, opts) => {
+      const cands = runPassiveScan(opts || {})
+      const { added } = addFindings(cands, 'passive')
+      return { added, scanned: cands.length, findings: listFindings(), summary: findingsSummary() }
+    })
+    ipcMain.handle('security:findings:list', () => ({ findings: listFindings(), summary: findingsSummary() }))
+    ipcMain.handle('security:findings:add', (_e, input) => addFinding(input || {}, 'user'))
+    ipcMain.handle('security:findings:update', (_e, id, patch) => updateFinding(String(id), patch || {}))
+    ipcMain.handle('security:findings:delete', (_e, id) => ({ ok: deleteFinding(String(id)) }))
+    ipcMain.handle('security:findings:clear', () => { clearFindings(); return { ok: true } })
+    ipcMain.handle('security:report', (_e, meta) => {
+      const scope = getScopeState().rules.map((r) => r.raw)
+      return { markdown: generateReport({ ...(meta || {}), scope }) }
+    })
+    ipcMain.handle('security:fuzz:run', async (_e, req, cfg) => {
+      const browserSession = session.fromPartition('persist:browser-workspace')
+      return await runFuzz(browserSession, req || {}, cfg || { payloads: [] })
+    })
+    ipcMain.handle('security:fuzz:cancel', (_e, jobId) => cancelFuzz(String(jobId)))
+    setFuzzProgressPusher((data) => sendToRenderer('security:event', data))
     // Push intercept-paused events from the capture engine to the renderer, which
     // forwards them to the visible OWUI guest (Content.svelte onData handler).
     setSecurityEventPusher((data) => sendToRenderer('security:event', data))

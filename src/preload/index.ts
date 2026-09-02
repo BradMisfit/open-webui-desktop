@@ -215,7 +215,17 @@ const api = {
   securityInterceptGet: () => ipcRenderer.invoke('security:intercept:get'),
   securityInterceptDecide: (input: any) => ipcRenderer.invoke('security:intercept:decide', input),
   securityRepeaterSend: (req: any) => ipcRenderer.invoke('security:repeater:send', req),
-  securityWsSend: (req: any) => ipcRenderer.invoke('security:ws:send', req)
+  securityWsSend: (req: any) => ipcRenderer.invoke('security:ws:send', req),
+  // Phase D — Passive analysis, Findings, Fuzzer
+  securityPassiveScan: (opts: any) => ipcRenderer.invoke('security:passive:scan', opts),
+  securityFindingsList: () => ipcRenderer.invoke('security:findings:list'),
+  securityFindingsAdd: (input: any) => ipcRenderer.invoke('security:findings:add', input),
+  securityFindingsUpdate: (id: string, patch: any) => ipcRenderer.invoke('security:findings:update', id, patch),
+  securityFindingsDelete: (id: string) => ipcRenderer.invoke('security:findings:delete', id),
+  securityFindingsClear: () => ipcRenderer.invoke('security:findings:clear'),
+  securityReport: (meta: any) => ipcRenderer.invoke('security:report', meta),
+  securityFuzzRun: (req: any, cfg: any) => ipcRenderer.invoke('security:fuzz:run', req, cfg),
+  securityFuzzCancel: (jobId: string) => ipcRenderer.invoke('security:fuzz:cancel', jobId)
 }
 
 if (process.contextIsolated) {
