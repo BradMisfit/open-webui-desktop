@@ -7,7 +7,7 @@
   import GetStartedModal from './GetStartedModal.svelte'
   import AddConnectionModal from './AddConnectionModal.svelte'
   import BrowserOverlay from '../../browser/BrowserOverlay.svelte'
-  import { handleBrowserRequest, setBrowserStatePusher } from '../../../browser/browserControl'
+  import { handleBrowserRequest, setBrowserStatePusher, executeBrowserAction } from '../../../browser/browserControl'
   import landingVideo from '../../../../assets/landing.mp4'
 
   interface Props {
@@ -221,10 +221,16 @@
             // Desktop renderer API, and the browser <webview> content itself has
             // no bridge to any shell API.
             if (typeof requestData.type === 'string' && requestData.type.startsWith('browser:')) {
-              const response =
-                requestData.type === 'browser:capabilities'
-                  ? { ok: true, supported: true, version: 1 }
-                  : handleBrowserRequest(requestData.type, requestData.data ?? {})
+              let response: unknown
+              if (requestData.type === 'browser:capabilities') {
+                response = { ok: true, supported: true, version: 2 }
+              } else if (requestData.type === 'browser:action') {
+                // AI action: async execution on the visible browser tab.
+                const d = requestData.data ?? {}
+                response = await executeBrowserAction(String(d.tabId ?? ''), String(d.action ?? ''), d.params ?? {})
+              } else {
+                response = handleBrowserRequest(requestData.type, requestData.data ?? {})
+              }
               if (requestData._requestId) {
                 wv.send('desktop:response', { _responseId: requestData._requestId, data: response })
               }

@@ -17,6 +17,8 @@
     registerWebview,
     unregisterWebview,
     pushBrowserState,
+    recordConsole,
+    recordFailure,
     BROWSER_PARTITION,
     type BrowserTab,
     type BrowserTabState
@@ -65,8 +67,17 @@
       emit(el, tabId, false)
     }
     const onFail = (e: any): void => {
+      // Record all main + sub-resource failures for AI "network failures", but
+      // only surface a main-frame failure as page-level error state.
+      if (e?.errorCode !== -3) {
+        recordFailure(tabId, e?.validatedURL || '', e?.errorDescription || 'load failed')
+      }
       if (e?.errorCode === -3 || e?.isMainFrame === false) return
       emit(el, tabId, false, e?.errorDescription || 'Failed to load page')
+    }
+    const onConsole = (e: any): void => {
+      // level: 0 verbose, 1 info, 2 warning, 3 error — keep warnings + errors.
+      if ((e?.level ?? 0) >= 2) recordConsole(tabId, e?.level >= 3 ? 'error' : 'warning', e?.message || '')
     }
     const onReady = (): void => emit(el, tabId, false)
     el.addEventListener('did-start-loading', onStart)
@@ -76,6 +87,7 @@
     el.addEventListener('page-title-updated', onTitle)
     el.addEventListener('page-favicon-updated', onFavicon)
     el.addEventListener('did-fail-load', onFail)
+    el.addEventListener('console-message', onConsole)
     el.addEventListener('dom-ready', onReady)
     return {
       destroy(): void {
@@ -86,6 +98,7 @@
         el.removeEventListener('page-title-updated', onTitle)
         el.removeEventListener('page-favicon-updated', onFavicon)
         el.removeEventListener('did-fail-load', onFail)
+        el.removeEventListener('console-message', onConsole)
         el.removeEventListener('dom-ready', onReady)
         unregisterWebview(tabId)
         favicons.delete(tabId)

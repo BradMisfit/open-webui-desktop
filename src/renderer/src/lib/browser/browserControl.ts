@@ -15,6 +15,7 @@
  * the guest — only the small state object below.
  */
 import { writable, get } from 'svelte/store'
+import { buildPageScript } from './pageScript'
 
 export interface BrowserBounds {
   x: number
@@ -68,6 +69,109 @@ export function registerWebview(tabId: string, el: any): void {
 }
 export function unregisterWebview(tabId: string): void {
   elements.delete(tabId)
+  logBuffers.delete(tabId)
+}
+
+// ── Bounded diagnostics buffers (populated by BrowserOverlay) ──────────────
+interface LogBuffers {
+  console: Array<{ level: string; message: string }>
+  failures: Array<{ url: string; error: string }>
+}
+const logBuffers = new Map<string, LogBuffers>()
+const RING = 40
+function buf(tabId: string): LogBuffers {
+  let b = logBuffers.get(tabId)
+  if (!b) {
+    b = { console: [], failures: [] }
+    logBuffers.set(tabId, b)
+  }
+  return b
+}
+export function recordConsole(tabId: string, level: string, message: string): void {
+  const b = buf(tabId)
+  b.console.push({ level, message: String(message || '').slice(0, 500) })
+  if (b.console.length > RING) b.console.shift()
+}
+export function recordFailure(tabId: string, url: string, error: string): void {
+  const b = buf(tabId)
+  b.failures.push({ url: String(url || '').slice(0, 300), error: String(error || '').slice(0, 200) })
+  if (b.failures.length > RING) b.failures.shift()
+}
+
+// ── AI action engine ───────────────────────────────────────────────────────
+// Executes one bounded action on the visible browser tab and returns a small
+// serializable observation. No cookies/secrets ever leave the page (see
+// pageScript.ts password guard); screenshots are downscaled.
+const DOM_ACTIONS = new Set(['get_page', 'read_text', 'find', 'inspect', 'click', 'type', 'select', 'scroll'])
+
+function waitForLoad(el: any, ms = 8000): Promise<void> {
+  return new Promise((resolve) => {
+    let done = false
+    const finish = (): void => {
+      if (done) return
+      done = true
+      try { el.removeEventListener('did-stop-loading', finish) } catch (_) { /* noop */ }
+      resolve()
+    }
+    try { el.addEventListener('did-stop-loading', finish) } catch (_) { /* noop */ }
+    setTimeout(finish, ms)
+  })
+}
+
+export async function executeBrowserAction(
+  tabId: string,
+  action: string,
+  params: Record<string, unknown>
+): Promise<any> {
+  const el = elements.get(tabId)
+  if (!el) return { ok: false, error: 'no visible browser tab for this session' }
+
+  try {
+    if (action === 'navigate' || action === 'open') {
+      const url = sanitizeUrl(String((params as any)?.url ?? ''))
+      if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'only http(s) URLs can be opened' }
+      el.loadURL(url)
+      await waitForLoad(el)
+      let cur = url
+      let title = ''
+      try { cur = el.getURL() } catch (_) { /* noop */ }
+      try { title = el.getTitle() } catch (_) { /* noop */ }
+      return { ok: true, url: cur, title }
+    }
+    if (action === 'back') { try { if (el.canGoBack()) el.goBack() } catch (_) { /* noop */ } await waitForLoad(el, 4000); return { ok: true, url: safeUrl(el) } }
+    if (action === 'forward') { try { if (el.canGoForward()) el.goForward() } catch (_) { /* noop */ } await waitForLoad(el, 4000); return { ok: true, url: safeUrl(el) } }
+    if (action === 'reload') { try { el.reload() } catch (_) { /* noop */ } await waitForLoad(el, 6000); return { ok: true, url: safeUrl(el) } }
+    if (action === 'stop') { try { el.stop() } catch (_) { /* noop */ } return { ok: true } }
+
+    if (action === 'screenshot') {
+      const img = await el.capturePage()
+      const resized = img.resize({ width: 1000 })
+      const dataUrl = resized.toDataURL ? resized.toDataURL() : `data:image/png;base64,${resized.toPNG().toString('base64')}`
+      return { ok: true, url: safeUrl(el), image: dataUrl }
+    }
+    if (action === 'console_errors') {
+      return { ok: true, entries: buf(tabId).console.slice(-20) }
+    }
+    if (action === 'network_failures') {
+      return { ok: true, entries: buf(tabId).failures.slice(-20) }
+    }
+    if (DOM_ACTIONS.has(action)) {
+      const result = await el.executeJavaScript(buildPageScript(action, params), true)
+      return result
+    }
+    return { ok: false, error: 'unknown browser action: ' + action }
+  } catch (e: any) {
+    return { ok: false, error: String((e && e.message) || e) }
+  }
+}
+
+function safeUrl(el: any): string {
+  try {
+    const u = el.getURL()
+    return u === 'about:blank' ? '' : u
+  } catch (_) {
+    return ''
+  }
 }
 
 function sanitizeUrl(raw: string): string {
