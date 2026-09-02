@@ -209,7 +209,12 @@ const api = {
   securitySiteMap: (opts?: any) => ipcRenderer.invoke('security:sitemap', opts),
   securityWebSockets: () => ipcRenderer.invoke('security:websockets'),
   securityWsMessages: (id: string, opts?: any) => ipcRenderer.invoke('security:wsMessages', id, opts),
-  securityOpenDevTools: (webContentsId: number) => ipcRenderer.invoke('security:openDevTools', webContentsId)
+  securityOpenDevTools: (webContentsId: number) => ipcRenderer.invoke('security:openDevTools', webContentsId),
+  // Phase B — Intercept + Repeater
+  securityInterceptSet: (opts: any) => ipcRenderer.invoke('security:intercept:set', opts),
+  securityInterceptGet: () => ipcRenderer.invoke('security:intercept:get'),
+  securityInterceptDecide: (input: any) => ipcRenderer.invoke('security:intercept:decide', input),
+  securityRepeaterSend: (req: any) => ipcRenderer.invoke('security:repeater:send', req)
 }
 
 if (process.contextIsolated) {

@@ -137,6 +137,21 @@
       }
     })
 
+    // Forward Security Workspace push events (intercept-paused) from main → the
+    // visible OWUI guest, using the same active-guest lookup.
+    window.electronAPI.onData?.((msg: any) => {
+      if (!msg || msg.type !== 'security:event') return
+      const guests = Array.from(
+        document.querySelectorAll('webview[partition^="persist:connection-"]')
+      ) as any[]
+      const active = guests.find((w) => w.style?.display !== 'none') ?? guests[0]
+      try {
+        active?.send('desktop:event', msg.data)
+      } catch {
+        /* guest not ready */
+      }
+    })
+
     const observer = new MutationObserver(() => {
       const container = document.querySelector('.content-webview-container')
       if (!container) return
@@ -276,6 +291,18 @@
                     break
                   case 'security:clear':
                     response = await api.securityClear?.()
+                    break
+                  case 'security:intercept:set':
+                    response = await api.securityInterceptSet?.(d)
+                    break
+                  case 'security:intercept:get':
+                    response = await api.securityInterceptGet?.()
+                    break
+                  case 'security:intercept:decide':
+                    response = await api.securityInterceptDecide?.(d)
+                    break
+                  case 'security:repeater:send':
+                    response = await api.securityRepeaterSend?.(d)
                     break
                   case 'security:openDevTools': {
                     // The guest knows only the tabId; resolve it to the live

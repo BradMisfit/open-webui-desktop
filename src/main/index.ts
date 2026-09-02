@@ -97,8 +97,13 @@ import {
   getEntry,
   getSiteMap,
   getWebSockets,
-  getWebSocketMessages
+  getWebSocketMessages,
+  setIntercept,
+  getIntercept,
+  decideIntercept,
+  setSecurityEventPusher
 } from './security/captureEngine'
+import { sendRepeaterRequest } from './security/repeater'
 
 import log from 'electron-log'
 log.transports.file.resolvePathFn = () => getLogFilePath('main')
@@ -1512,7 +1517,28 @@ if (!gotTheLock) {
     })
     ipcMain.handle('security:getScope', () => getScope())
     ipcMain.handle('security:setScope', (_e, input) => setScope(input || {}))
-    ipcMain.handle('security:setCaptureMode', (_e, opts) => setCaptureMode(opts || {}))
+    // Attach the CDP deep-capture producer to any already-open browser tabs
+    // (did-attach-webview only fires for future tabs). Used when the user turns on
+    // Deep capture or Intercept after tabs are already open.
+    const attachDeepToBrowserTabs = (): void => {
+      try {
+        const bs = session.fromPartition('persist:browser-workspace')
+        for (const wc of webContents.getAllWebContents()) {
+          try {
+            if (wc.session === bs) attachDeep(wc)
+          } catch {
+            /* skip inaccessible */
+          }
+        }
+      } catch {
+        /* noop */
+      }
+    }
+    ipcMain.handle('security:setCaptureMode', (_e, opts) => {
+      const r = setCaptureMode(opts || {})
+      if (r.deep) attachDeepToBrowserTabs()
+      return r
+    })
     ipcMain.handle('security:clear', () => {
       clearCapture()
       return { ok: true }
@@ -1532,6 +1558,25 @@ if (!gotTheLock) {
         return { ok: false, error: String((err as Error)?.message || err) }
       }
     })
+    // Phase B — Intercept + Repeater
+    ipcMain.handle('security:intercept:set', (_e, opts) => {
+      // Intercept needs the CDP debugger; enabling it turns on deep capture and
+      // attaches to any already-open browser tabs so it works without a reload.
+      if (opts?.enabled) {
+        setCaptureMode({ deep: true })
+        attachDeepToBrowserTabs()
+      }
+      return setIntercept(opts || {})
+    })
+    ipcMain.handle('security:intercept:get', () => getIntercept())
+    ipcMain.handle('security:intercept:decide', (_e, input) => decideIntercept(input || {}))
+    ipcMain.handle('security:repeater:send', async (_e, req) => {
+      const browserSession = session.fromPartition('persist:browser-workspace')
+      return await sendRepeaterRequest(browserSession, req || {})
+    })
+    // Push intercept-paused events from the capture engine to the renderer, which
+    // forwards them to the visible OWUI guest (Content.svelte onData handler).
+    setSecurityEventPusher((data) => sendToRenderer('security:event', data))
 
     // Remote Workspace guest operations are intentionally narrow.  The
     // browser-facing content preload can request only these high-level flows;

@@ -119,9 +119,117 @@ export function unmapTab(webContentsId: number): void {
 // capture mode
 let deepMode = false
 const deepAttached = new Set<number>() // webContentsIds with a live CDP producer
+// Per-webContents CDP client refs so Intercept can toggle the Fetch domain on
+// already-attached debuggers.
+const deepClients = new Map<number, { send: (m: string, p?: object) => Promise<any> }>()
 export function setCaptureMode(opts: { deep?: boolean }): { deep: boolean } {
   if (typeof opts?.deep === 'boolean') deepMode = opts.deep
   return { deep: deepMode }
+}
+
+// ── Intercept (CDP Fetch domain) ─────────────────────────────────────────────
+interface InterceptFilters {
+  xhrOnly?: boolean
+  documentOnly?: boolean
+  mutatingOnly?: boolean
+  host?: string
+  urlRegex?: string
+  inScopeOnly?: boolean
+}
+interface PausedRequest {
+  id: string // `${wcId}:${cdpRequestId}`
+  wcId: number
+  cdpRequestId: string
+  method: string
+  url: string
+  headers: Header[]
+  postData: string | null
+  resourceType: string
+  tabId: string | null
+  createdAt: number
+  timer: NodeJS.Timeout | null
+}
+let interceptEnabled = false
+let interceptFilters: InterceptFilters = {}
+const INTERCEPT_FAILSAFE_MS = 45000 // auto-forward a held request if no decision arrives
+const paused = new Map<string, PausedRequest>()
+// main→guest push for intercept events (set by index.ts → sendMainData)
+let securityPush: ((data: object) => void) | null = null
+export function setSecurityEventPusher(fn: (data: object) => void): void {
+  securityPush = fn
+}
+
+export function setIntercept(opts: { enabled?: boolean; filters?: InterceptFilters }): { enabled: boolean; filters: InterceptFilters; attached: number } {
+  if (typeof opts?.enabled === 'boolean') interceptEnabled = opts.enabled
+  if (opts?.filters && typeof opts.filters === 'object') interceptFilters = { ...opts.filters }
+  // Toggle Fetch on every currently-attached debugger.
+  for (const client of deepClients.values()) {
+    if (interceptEnabled) {
+      client.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] })
+    } else {
+      client.send('Fetch.disable')
+    }
+  }
+  if (!interceptEnabled) {
+    // release anything still held so the browser never hangs
+    for (const p of [...paused.values()]) continueRequest(p, null)
+  }
+  return { enabled: interceptEnabled, filters: interceptFilters, attached: deepClients.size }
+}
+
+export function getIntercept(): object {
+  return {
+    enabled: interceptEnabled,
+    filters: interceptFilters,
+    attached: deepClients.size,
+    deep: deepMode,
+    queue: [...paused.values()].map((p) => ({
+      id: p.id, method: p.method, url: p.url, resourceType: p.resourceType,
+      host: splitUrl(p.url).host, tabId: p.tabId, createdAt: p.createdAt, inScope: isInScope(p.url),
+      headers: redactHeaders(p.headers, false), body: p.postData ? maskBodyText(p.postData) : null
+    }))
+  }
+}
+
+function interceptMatches(method: string, url: string, resourceType: string): boolean {
+  const f = interceptFilters
+  if (f.inScopeOnly && !isInScope(url)) return false
+  if (f.mutatingOnly && !['POST', 'PUT', 'PATCH', 'DELETE'].includes(method.toUpperCase())) return false
+  if (f.xhrOnly && !['xhr', 'fetch'].includes(resourceType.toLowerCase())) return false
+  if (f.documentOnly && resourceType.toLowerCase() !== 'document') return false
+  if (f.host) { try { if (!new URL(url).host.toLowerCase().includes(f.host.toLowerCase())) return false } catch { return false } }
+  if (f.urlRegex) { try { if (!new RegExp(f.urlRegex, 'i').test(url)) return false } catch { /* bad regex → ignore */ } }
+  return true
+}
+
+function continueRequest(p: PausedRequest, edit: { method?: string; url?: string; headers?: Header[]; body?: string } | null): void {
+  const client = deepClients.get(p.wcId)
+  paused.delete(p.id)
+  if (p.timer) clearTimeout(p.timer)
+  if (!client) return
+  const params: any = { requestId: p.cdpRequestId }
+  if (edit) {
+    if (edit.url) params.url = edit.url
+    if (edit.method) params.method = edit.method.toUpperCase()
+    if (Array.isArray(edit.headers)) params.headers = edit.headers.map((h) => ({ name: h.name, value: h.value }))
+    if (typeof edit.body === 'string') params.postData = Buffer.from(edit.body, 'utf-8').toString('base64')
+  }
+  client.send('Fetch.continueRequest', params)
+}
+
+export function decideIntercept(input: { id: string; action: 'forward' | 'drop' | 'edit'; edit?: { method?: string; url?: string; headers?: Header[]; body?: string } }): { ok: boolean; error?: string } {
+  const p = paused.get(String(input?.id || ''))
+  if (!p) return { ok: false, error: 'no such paused request (it may have auto-forwarded)' }
+  const client = deepClients.get(p.wcId)
+  if (!client) { paused.delete(p.id); return { ok: false, error: 'browser tab is gone' } }
+  if (input.action === 'drop') {
+    paused.delete(p.id)
+    if (p.timer) clearTimeout(p.timer)
+    client.send('Fetch.failRequest', { requestId: p.cdpRequestId, errorReason: 'Aborted' })
+    return { ok: true }
+  }
+  continueRequest(p, input.action === 'edit' ? (input.edit || null) : null)
+  return { ok: true }
 }
 function deepActive(webContentsId: number | null): boolean {
   return deepMode && webContentsId !== null && deepAttached.has(webContentsId)
@@ -399,6 +507,8 @@ export function attachDeep(guest: WebContents): void {
 
   const send = (method: string, params?: object): Promise<any> => dbg.sendCommand(method, params).catch(() => ({}))
   send('Network.enable', { maxtotal: MAX_TOTAL_BYTES, maxResource: MAX_BODY_BYTES })
+  deepClients.set(wcId, { send })
+  if (interceptEnabled) send('Fetch.enable', { patterns: [{ urlPattern: '*' }] })
 
   dbg.on('message', (_e, method, params: any) => {
     try {
@@ -468,11 +578,55 @@ export function attachDeep(guest: WebContents): void {
     } else if (method === 'Network.webSocketClosed') {
       const c = wsConnections.get(`${wcId}:${params.requestId}`)
       if (c) c.status = 'closed'
+    } else if (method === 'Fetch.requestPaused') {
+      handleFetchPaused(params)
+    }
+  }
+
+  function handleFetchPaused(params: any): void {
+    const cdpRequestId = String(params?.requestId || '')
+    const url = String(params?.request?.url || '')
+    const httpMethod = String(params?.request?.method || 'GET')
+    const resourceType = String(params?.resourceType || 'Other')
+    // Not intercepting, or doesn't match filters → let it through immediately.
+    if (!interceptEnabled || !interceptMatches(httpMethod, url, resourceType)) {
+      send('Fetch.continueRequest', { requestId: cdpRequestId })
+      return
+    }
+    const id = `${wcId}:${cdpRequestId}`
+    const p: PausedRequest = {
+      id, wcId, cdpRequestId,
+      method: httpMethod, url,
+      headers: toHeaders(params?.request?.headers),
+      postData: typeof params?.request?.postData === 'string' ? params.request.postData : null,
+      resourceType, tabId: tabByWc.get(wcId) ?? null, createdAt: Date.now(), timer: null
+    }
+    // Fail-safe: never leave a request hung if the UI never answers.
+    p.timer = setTimeout(() => {
+      if (paused.has(id)) continueRequest(p, null)
+    }, INTERCEPT_FAILSAFE_MS)
+    paused.set(id, p)
+    if (securityPush) {
+      securityPush({ type: 'security:intercept-paused', data: {
+        id, method: p.method, url: p.url, host: splitUrl(url).host, resourceType,
+        tabId: p.tabId, inScope: isInScope(url),
+        headers: redactHeaders(p.headers, false), body: p.postData ? maskBodyText(p.postData) : null
+      } })
     }
   }
 
   const onDetach = (): void => {
     deepAttached.delete(wcId)
+    deepClients.delete(wcId)
+    // Any request held for this tab can no longer be continued via CDP — drop it
+    // from the queue so the UI doesn't show stale entries (the page's own request
+    // fails naturally when the debugger detaches).
+    for (const p of [...paused.values()]) {
+      if (p.wcId === wcId) {
+        if (p.timer) clearTimeout(p.timer)
+        paused.delete(p.id)
+      }
+    }
   }
   dbg.on('detach', onDetach)
   guest.once('destroyed', () => {
@@ -617,6 +771,24 @@ export function getEntry(id: string, opts: { reveal?: boolean } = {}): object | 
     },
     redirectChain: e.redirectChain,
     producer: e.producer
+  }
+}
+
+/**
+ * Raw (UNREDACTED) request snapshot for one captured entry — for the trusted
+ * Repeater's "use original protected authorization" only. Main-process only:
+ * NEVER exposed over IPC to the guest or the model. Returns the real
+ * Authorization/Cookie header values so the Repeater can replay an authorized
+ * request without those values ever passing through the model or the UI.
+ */
+export function getRawRequest(id: string): { method: string; url: string; headers: Header[]; body: BodyCapture } | null {
+  const e = entries.get(id)
+  if (!e) return null
+  return {
+    method: e.method,
+    url: e.url,
+    headers: e.requestHeaders.map((h) => ({ ...h })),
+    body: { ...e.requestBody }
   }
 }
 
