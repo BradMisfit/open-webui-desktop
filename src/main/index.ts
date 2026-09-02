@@ -15,7 +15,8 @@ import {
   Menu,
   ipcMain,
   Tray,
-  dialog
+  dialog,
+  webContents
 } from 'electron'
 import path, { join } from 'path'
 import { readFile, statfs } from 'fs/promises'
@@ -84,6 +85,20 @@ import {
 
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
 import { createDesktopRemoteWorkspaceService } from './remote-workspace'
+import { getScope, setScope } from './security/scope'
+import {
+  installCapture,
+  attachDeep,
+  mapTab,
+  unmapTab,
+  setCaptureMode,
+  clearCapture,
+  getHistory,
+  getEntry,
+  getSiteMap,
+  getWebSockets,
+  getWebSocketMessages
+} from './security/captureEngine'
 
 import log from 'electron-log'
 log.transports.file.resolvePathFn = () => getLogFilePath('main')
@@ -696,6 +711,13 @@ function createMainWindow(show = true): void {
       isBrowserGuest = false
     }
     if (!isBrowserGuest) return
+    // Attach the opt-in CDP deep-capture producer (response bodies + WebSocket
+    // frames). No-op unless deep mode is enabled; yields to the user's DevTools.
+    try {
+      attachDeep(guest)
+    } catch {
+      /* deep capture is best-effort; webRequest still covers metadata */
+    }
     guest.setWindowOpenHandler((details) => {
       try {
         if (/^https?:\/\//i.test(details.url || '')) guest.loadURL(details.url)
@@ -1353,13 +1375,12 @@ if (!gotTheLock) {
     browserSession.setPermissionRequestHandler((_webContents, permission, callback) => {
       callback(permission === 'clipboard-sanitized-write')
     })
-    browserSession.webRequest.onBeforeRequest((details, callback) => {
-      if (/^(file|chrome|devtools|chrome-extension):/i.test(details.url || '')) {
-        callback({ cancel: true })
-        return
-      }
-      callback({})
-    })
+    // Security Workspace capture engine: installs the webRequest listeners on the
+    // browser partition (metadata + request bodies) and preserves the
+    // dangerous-scheme block above inside its onBeforeRequest. This is the
+    // always-on producer for HTTP History + Site Map. Response bodies + WS frames
+    // come from the opt-in CDP producer attached per-guest in did-attach-webview.
+    installCapture(browserSession)
 
     app.on('browser-window-created', (_, window) => {
       optimizer.watchWindowShortcuts(window)
@@ -1475,6 +1496,42 @@ if (!gotTheLock) {
     // ─── IPC Handlers ─────────────────────────────────
 
     ipcMain.handle('get:version', () => app.getVersion())
+
+    // ── Security Workspace (Pentest) IPC ──────────────────────────────────────
+    // The trusted control plane for the visible Browser Workspace. Queries are
+    // read-only in Phase A; scope is user-declared here (never by the model).
+    // `reveal` (raw sensitive headers) is honoured only on this user-driven IPC
+    // path — the AI gateway path always receives the redacted projection.
+    ipcMain.handle('security:mapTab', (_e, tabId: string, webContentsId: number) => {
+      mapTab(Number(webContentsId), String(tabId))
+      return { ok: true }
+    })
+    ipcMain.handle('security:unmapTab', (_e, webContentsId: number) => {
+      unmapTab(Number(webContentsId))
+      return { ok: true }
+    })
+    ipcMain.handle('security:getScope', () => getScope())
+    ipcMain.handle('security:setScope', (_e, input) => setScope(input || {}))
+    ipcMain.handle('security:setCaptureMode', (_e, opts) => setCaptureMode(opts || {}))
+    ipcMain.handle('security:clear', () => {
+      clearCapture()
+      return { ok: true }
+    })
+    ipcMain.handle('security:history', (_e, filter) => getHistory(filter || {}))
+    ipcMain.handle('security:entry', (_e, id: string, opts) => getEntry(String(id), opts || {}))
+    ipcMain.handle('security:sitemap', (_e, opts) => getSiteMap(opts || {}))
+    ipcMain.handle('security:websockets', () => getWebSockets())
+    ipcMain.handle('security:wsMessages', (_e, id: string, opts) => getWebSocketMessages(String(id), opts || {}))
+    ipcMain.handle('security:openDevTools', (_e, webContentsId: number) => {
+      try {
+        const wc = webContents.fromId(Number(webContentsId))
+        if (!wc) return { ok: false, error: 'no such tab' }
+        wc.openDevTools({ mode: 'detach' })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, error: String((err as Error)?.message || err) }
+      }
+    })
 
     // Remote Workspace guest operations are intentionally narrow.  The
     // browser-facing content preload can request only these high-level flows;

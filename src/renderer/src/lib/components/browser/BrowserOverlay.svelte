@@ -79,7 +79,24 @@
       // level: 0 verbose, 1 info, 2 warning, 3 error — keep warnings + errors.
       if ((e?.level ?? 0) >= 2) recordConsole(tabId, e?.level >= 3 ? 'error' : 'warning', e?.message || '')
     }
-    const onReady = (): void => emit(el, tabId, false)
+    // Correlate this browser tab to its WebContents so the Security Workspace
+    // capture engine (main process) can attribute traffic to the tab.
+    let mappedWcId = -1
+    const mapTab = (): void => {
+      try {
+        const wcId = el.getWebContentsId?.()
+        if (typeof wcId === 'number' && wcId !== mappedWcId) {
+          mappedWcId = wcId
+          ;(window as any).electronAPI?.securityMapTab?.(tabId, wcId)
+        }
+      } catch {
+        /* not attached yet */
+      }
+    }
+    const onReady = (): void => {
+      mapTab()
+      emit(el, tabId, false)
+    }
     el.addEventListener('did-start-loading', onStart)
     el.addEventListener('did-stop-loading', onStop)
     el.addEventListener('did-navigate', onNav)
@@ -100,6 +117,11 @@
         el.removeEventListener('did-fail-load', onFail)
         el.removeEventListener('console-message', onConsole)
         el.removeEventListener('dom-ready', onReady)
+        try {
+          if (mappedWcId >= 0) (window as any).electronAPI?.securityUnmapTab?.(mappedWcId)
+        } catch {
+          /* noop */
+        }
         unregisterWebview(tabId)
         favicons.delete(tabId)
       }

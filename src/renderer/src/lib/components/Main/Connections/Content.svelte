@@ -7,7 +7,7 @@
   import GetStartedModal from './GetStartedModal.svelte'
   import AddConnectionModal from './AddConnectionModal.svelte'
   import BrowserOverlay from '../../browser/BrowserOverlay.svelte'
-  import { handleBrowserRequest, setBrowserStatePusher, executeBrowserAction } from '../../../browser/browserControl'
+  import { handleBrowserRequest, setBrowserStatePusher, executeBrowserAction, webContentsIdForTab } from '../../../browser/browserControl'
   import landingVideo from '../../../../assets/landing.mp4'
 
   interface Props {
@@ -230,6 +230,67 @@
                 response = await executeBrowserAction(String(d.tabId ?? ''), String(d.action ?? ''), d.params ?? {})
               } else {
                 response = handleBrowserRequest(requestData.type, requestData.data ?? {})
+              }
+              if (requestData._requestId) {
+                wv.send('desktop:response', { _responseId: requestData._requestId, data: response })
+              }
+              return
+            }
+
+            // Security Workspace (Pentest) control plane: an explicit allowlist,
+            // handled entirely in the shell renderer over the trusted
+            // window.electronAPI.security* IPC. Never falls through to the broad
+            // Desktop API. Read/scope only in Phase A.
+            if (typeof requestData.type === 'string' && requestData.type.startsWith('security:')) {
+              const api = window.electronAPI as any
+              const d = requestData.data ?? {}
+              let response: unknown
+              try {
+                switch (requestData.type) {
+                  case 'security:capabilities':
+                    response = { ok: true, supported: true, version: 1 }
+                    break
+                  case 'security:history':
+                    response = await api.securityHistory?.(d)
+                    break
+                  case 'security:entry':
+                    response = await api.securityEntry?.(String(d.id ?? ''), { reveal: !!d.reveal })
+                    break
+                  case 'security:sitemap':
+                    response = await api.securitySiteMap?.(d)
+                    break
+                  case 'security:websockets':
+                    response = await api.securityWebSockets?.()
+                    break
+                  case 'security:wsMessages':
+                    response = await api.securityWsMessages?.(String(d.id ?? ''), { reveal: !!d.reveal })
+                    break
+                  case 'security:getScope':
+                    response = await api.securityGetScope?.()
+                    break
+                  case 'security:setScope':
+                    response = await api.securitySetScope?.(d)
+                    break
+                  case 'security:setCaptureMode':
+                    response = await api.securitySetCaptureMode?.(d)
+                    break
+                  case 'security:clear':
+                    response = await api.securityClear?.()
+                    break
+                  case 'security:openDevTools': {
+                    // The guest knows only the tabId; resolve it to the live
+                    // WebContents id here (main opens DevTools on that page).
+                    const wcId = d.tabId ? webContentsIdForTab(String(d.tabId)) : Number(d.webContentsId ?? 0)
+                    response = wcId > 0
+                      ? await api.securityOpenDevTools?.(wcId)
+                      : { ok: false, error: 'no visible browser tab for DevTools' }
+                    break
+                  }
+                  default:
+                    response = { ok: false, error: 'unknown-security-request' }
+                }
+              } catch (err) {
+                response = { ok: false, error: String((err as Error)?.message || err) }
               }
               if (requestData._requestId) {
                 wv.send('desktop:response', { _responseId: requestData._requestId, data: response })

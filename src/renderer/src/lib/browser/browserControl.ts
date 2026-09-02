@@ -72,6 +72,16 @@ export function unregisterWebview(tabId: string): void {
   logBuffers.delete(tabId)
 }
 
+/** Resolve a browser tab to its live WebContents id (for CDP/DevTools in main). */
+export function webContentsIdForTab(tabId: string): number {
+  const el = elements.get(tabId)
+  try {
+    return el?.getWebContentsId?.() ?? -1
+  } catch {
+    return -1
+  }
+}
+
 // ── Bounded diagnostics buffers (populated by BrowserOverlay) ──────────────
 interface LogBuffers {
   console: Array<{ level: string; message: string }>

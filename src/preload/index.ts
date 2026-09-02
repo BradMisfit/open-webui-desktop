@@ -192,7 +192,24 @@ const api = {
   getChangelog: () => ipcRenderer.invoke('app:changelog'),
 
   // Auth token relay from webview
-  setAuthToken: (token: string) => ipcRenderer.invoke('app:setAuthToken', token)
+  setAuthToken: (token: string) => ipcRenderer.invoke('app:setAuthToken', token),
+
+  // Security Workspace (Pentest) — trusted control-plane queries over the visible
+  // Browser Workspace session. Read-only in Phase A. `reveal` for raw sensitive
+  // headers is honoured only through this user-driven renderer path.
+  securityMapTab: (tabId: string, webContentsId: number) =>
+    ipcRenderer.invoke('security:mapTab', tabId, webContentsId),
+  securityUnmapTab: (webContentsId: number) => ipcRenderer.invoke('security:unmapTab', webContentsId),
+  securityGetScope: () => ipcRenderer.invoke('security:getScope'),
+  securitySetScope: (input: any) => ipcRenderer.invoke('security:setScope', input),
+  securitySetCaptureMode: (opts: any) => ipcRenderer.invoke('security:setCaptureMode', opts),
+  securityClear: () => ipcRenderer.invoke('security:clear'),
+  securityHistory: (filter: any) => ipcRenderer.invoke('security:history', filter),
+  securityEntry: (id: string, opts?: any) => ipcRenderer.invoke('security:entry', id, opts),
+  securitySiteMap: (opts?: any) => ipcRenderer.invoke('security:sitemap', opts),
+  securityWebSockets: () => ipcRenderer.invoke('security:websockets'),
+  securityWsMessages: (id: string, opts?: any) => ipcRenderer.invoke('security:wsMessages', id, opts),
+  securityOpenDevTools: (webContentsId: number) => ipcRenderer.invoke('security:openDevTools', webContentsId)
 }
 
 if (process.contextIsolated) {
