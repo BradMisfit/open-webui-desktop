@@ -6,6 +6,8 @@
   import LocalInstall from '../../Setup/LocalInstall.svelte'
   import GetStartedModal from './GetStartedModal.svelte'
   import AddConnectionModal from './AddConnectionModal.svelte'
+  import BrowserOverlay from '../../browser/BrowserOverlay.svelte'
+  import { handleBrowserRequest, setBrowserStatePusher } from '../../../browser/browserControl'
   import landingVideo from '../../../../assets/landing.mp4'
 
   interface Props {
@@ -121,6 +123,20 @@
     // Fetch the content preload path once
     contentPreloadPath = await window.electronAPI.getContentPreloadPath()
 
+    // Route Browser Workspace state pushes to whichever OWUI connection guest is
+    // currently visible (dynamic lookup avoids capturing a stale connection id).
+    setBrowserStatePusher((payload) => {
+      const guests = Array.from(
+        document.querySelectorAll('webview[partition^="persist:connection-"]')
+      ) as any[]
+      const active = guests.find((w) => w.style?.display !== 'none') ?? guests[0]
+      try {
+        active?.send('desktop:event', payload)
+      } catch {
+        /* guest not ready */
+      }
+    })
+
     const observer = new MutationObserver(() => {
       const container = document.querySelector('.content-webview-container')
       if (!container) return
@@ -197,6 +213,21 @@
             // Handle auth token relay from webview
             if (requestData.type === 'token:update' && requestData.token) {
               window.electronAPI.setAuthToken?.(requestData.token)
+              return
+            }
+
+            // Browser Workspace control: an explicit allowlist handled entirely
+            // inside the shell renderer. It NEVER falls through to the broad
+            // Desktop renderer API, and the browser <webview> content itself has
+            // no bridge to any shell API.
+            if (typeof requestData.type === 'string' && requestData.type.startsWith('browser:')) {
+              const response =
+                requestData.type === 'browser:capabilities'
+                  ? { ok: true, supported: true, version: 1 }
+                  : handleBrowserRequest(requestData.type, requestData.data ?? {})
+              if (requestData._requestId) {
+                wv.send('desktop:response', { _responseId: requestData._requestId, data: response })
+              }
               return
             }
 
@@ -311,6 +342,10 @@
       allowpopups
     ></webview>
   {/each}
+
+  <!-- Browser Workspace: real <webview> siblings positioned over the OWUI
+       guest's right-panel region (see BrowserOverlay). -->
+  <BrowserOverlay />
 
   <!-- Error overlay when webview fails to load -->
   {#if activeWebviewError}

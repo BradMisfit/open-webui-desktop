@@ -670,6 +670,45 @@ function createMainWindow(show = true): void {
   mainWindow = new BrowserWindow(windowOpts)
   mainWindow.setIcon(icon)
 
+  // Harden Browser Workspace webviews at attach time. Connection guests keep
+  // their content preload (the trusted OWUI bridge); browser-workspace guests
+  // (arbitrary sites) get NO preload and locked-down prefs so page content can
+  // never reach any shell/Electron API.
+  mainWindow.webContents.on('will-attach-webview', (_event, webPreferences, params) => {
+    const partition = String((params as { partition?: string }).partition ?? '')
+    if (partition === 'persist:browser-workspace') {
+      delete (webPreferences as { preload?: string }).preload
+      webPreferences.nodeIntegration = false
+      webPreferences.contextIsolation = true
+      ;(webPreferences as { sandbox?: boolean }).sandbox = true
+      ;(webPreferences as { webSecurity?: boolean }).webSecurity = true
+    }
+  })
+
+  // Keep Browser Workspace links/popups inside the panel and block dangerous
+  // scheme navigations. Applied only to browser-workspace guests (connection
+  // guests keep their existing popup/OAuth behavior).
+  mainWindow.webContents.on('did-attach-webview', (_e, guest) => {
+    let isBrowserGuest = false
+    try {
+      isBrowserGuest = guest.session === session.fromPartition('persist:browser-workspace')
+    } catch {
+      isBrowserGuest = false
+    }
+    if (!isBrowserGuest) return
+    guest.setWindowOpenHandler((details) => {
+      try {
+        if (/^https?:\/\//i.test(details.url || '')) guest.loadURL(details.url)
+      } catch {
+        /* noop */
+      }
+      return { action: 'deny' }
+    })
+    guest.on('will-navigate', (event, url) => {
+      if (/^(file|chrome|devtools|chrome-extension):/i.test(url || '')) event.preventDefault()
+    })
+  })
+
   if (CONFIG?.windowMaximized) {
     mainWindow.maximize()
   }
@@ -1302,6 +1341,24 @@ if (!gotTheLock) {
         const allowed = ['media', 'mediaKeySystem', 'notifications', 'clipboard-read', 'clipboard-sanitized-write']
         callback(allowed.includes(permission))
       })
+    })
+
+    // ── Browser Workspace session (arbitrary sites) ──────────────────────────
+    // Locked down beyond the generic partition handler: deny sensitive
+    // permissions to arbitrary sites, and block file://, chrome:// and
+    // devtools:// at the network layer so a browsed page can never reach local
+    // files or privileged surfaces. Cookies stay inside this partition and are
+    // never exposed to the guest/model.
+    const browserSession = session.fromPartition('persist:browser-workspace')
+    browserSession.setPermissionRequestHandler((_webContents, permission, callback) => {
+      callback(permission === 'clipboard-sanitized-write')
+    })
+    browserSession.webRequest.onBeforeRequest((details, callback) => {
+      if (/^(file|chrome|devtools|chrome-extension):/i.test(details.url || '')) {
+        callback({ cancel: true })
+        return
+      }
+      callback({})
     })
 
     app.on('browser-window-created', (_, window) => {
