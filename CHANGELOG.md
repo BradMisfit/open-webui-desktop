@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.3] - 2026-09-03
+
+Desktop acceptance fixes for the Browser Workspace.
+
+### Fixed
+
+- **Browser page now fits the workspace.** The visible browser `<webview>` is
+  positioned from a fraction of the OWUI guest viewport multiplied by the live
+  overlay-container size, instead of the guest's raw pixels. This is invariant to
+  the guest webview's zoom factor, Windows display scaling, and DPR, so the page
+  no longer lands hundreds of pixels too far right with a black left margin and a
+  clipped right edge. The surface is clamped to its rectangle (it can't cover
+  other UI) and follows window resize, the chat/workspace splitter, sidebar
+  toggle, and maximize/restore via a container resize observer.
+- **Auto-update now works.** electron-updater was deriving an update channel from
+  our `-bradmisfit.N` version tag and looking for a `bradmisfit.yml` that is never
+  published, so updates were found silently or not at all. The channel is now
+  pinned to the published `latest.yml` with prerelease updates allowed, downloads
+  happen automatically, and a periodic re-check runs for long-lived sessions.
+
+### Added
+
+- **Distinct Browser Workspace icon.** The composer button uses a browser-window
+  icon instead of the globe, so it is no longer confused with Web Search, and it
+  turns blue (the same active style as the other composer controls) while a
+  Browser Workspace is open — derived from real workspace state. Clicking focuses
+  an existing Browser Workspace instead of opening a duplicate.
+- **Check-for-updates button in the status bar.** A refresh/spinner control next
+  to the version checks for updates on demand and shows checking / available /
+  downloading / restart state, so a ready update is always visible.
+
 ## [0.0.22-bradmisfit.2] - 2026-09-03
 
 Custom BradMisfit build. Adds the **Browser Workspace** and the **Web Security /
