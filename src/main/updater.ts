@@ -25,14 +25,14 @@ export function initUpdater(window: BrowserWindow): void {
   // "Restart to update" affordance in the status bar.
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
-  // Our custom versions carry a `-bradmisfit.N` SemVer prerelease tag. Without
-  // these two lines electron-updater derives an update CHANNEL from that tag
-  // (e.g. "bradmisfit") and looks for `bradmisfit.yml`, which we never publish —
-  // so it silently finds no update. Pin the channel to the `latest.yml` we DO
-  // publish, and allow prerelease-tagged versions to update to one another. This
-  // is the root cause the earlier build failed to auto-update.
-  autoUpdater.channel = 'latest'
-  autoUpdater.allowPrerelease = true
+  // Do NOT set `autoUpdater.channel`. Our versions carry a `-bradmisfit.N` SemVer
+  // prerelease tag, so electron-updater auto-enables allowPrerelease and, in the
+  // GitHub releases feed, matches the release whose tag channel is "bradmisfit",
+  // then reads `bradmisfit.yml` and FALLS BACK to the `latest.yml` we publish
+  // (GitHubProvider.getLatestVersion). Forcing channel='latest' instead made the
+  // feed matcher look for a non-existent "latest"-channel release → it threw
+  // "No published versions on GitHub" → the status-bar check reported "update
+  // check failed". Leaving the channel unset is what makes detection work.
   autoUpdater.setFeedURL(CUSTOM_UPDATE_FEED)
 
   autoUpdater.on('checking-for-update', () => {

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.4] - 2026-09-03
+
+### Fixed
+
+- **Update check no longer fails.** 0.0.22-bradmisfit.3 pinned the updater channel
+  to `latest`, but our releases live on the `bradmisfit` prerelease channel, so
+  electron-updater's GitHub feed matcher found no matching release and reported
+  "update check failed". The forced channel is removed: electron-updater now
+  matches the `bradmisfit`-channel release and reads `bradmisfit.yml`, falling
+  back to `latest.yml`. Releases now ship both manifests so the channel resolves
+  directly. Auto-download, the periodic re-check, and the status-bar
+  check-for-updates button work as intended.
+
 ## [0.0.22-bradmisfit.3] - 2026-09-03
 
 Desktop acceptance fixes for the Browser Workspace.
