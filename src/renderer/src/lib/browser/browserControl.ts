@@ -22,6 +22,11 @@ export interface BrowserBounds {
   y: number
   width: number
   height: number
+  // Guest viewport size at measurement time. When present, BrowserOverlay treats
+  // x/y/width/height as fractions of this and multiplies by the live overlay
+  // container size — zoom/DPR/origin-invariant. Absent (older guest) ⇒ raw px.
+  viewportWidth?: number
+  viewportHeight?: number
 }
 
 export interface BrowserTab {

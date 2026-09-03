@@ -12,6 +12,7 @@
    * integration, and links/popups stay inside this surface (handled in main).
    * Only bounded state (url/title/favicon/nav/loading) is pushed to the guest.
    */
+  import { onMount, onDestroy } from 'svelte'
   import {
     browserTabs,
     registerWebview,
@@ -23,12 +24,41 @@
     type BrowserTab,
     type BrowserTabState
   } from '../../browser/browserControl'
+  import { resolveOverlayRect } from '../../browser/overlayBounds.mjs'
 
   const favicons = new Map<string, string | null>()
 
-  function styleFor(tab: BrowserTab): string {
+  // Live size of the overlay container (== the OWUI guest webview's on-screen
+  // area). The guest reports its rect as a fraction of its own viewport; we
+  // multiply by THIS to get the exact on-screen pixels — invariant to the guest's
+  // zoom factor, Windows display scaling, and DPR. Re-measuring on resize also
+  // makes the surface follow splitter/sidebar/maximize changes with no re-report.
+  let containerEl: HTMLDivElement
+  let cw = 0
+  let ch = 0
+  let ro: ResizeObserver | null = null
+
+  function measure(): void {
+    if (!containerEl) return
+    cw = containerEl.clientWidth
+    ch = containerEl.clientHeight
+  }
+  onMount(() => {
+    measure()
+    ro = new ResizeObserver(() => measure())
+    if (containerEl) ro.observe(containerEl)
+    window.addEventListener('resize', measure)
+  })
+  onDestroy(() => {
+    ro?.disconnect()
+    window.removeEventListener('resize', measure)
+  })
+
+  // `cw`/`ch` are passed so Svelte re-evaluates the style when the container
+  // resizes, repositioning every browser webview from its stored fraction.
+  function styleFor(tab: BrowserTab, containerW: number, containerH: number): string {
     if (!tab.rect || !tab.visible) return 'display:none;'
-    const { x, y, width, height } = tab.rect
+    const { x, y, width, height } = resolveOverlayRect(tab.rect, containerW, containerH)
     return `position:absolute; left:${x}px; top:${y}px; width:${width}px; height:${height}px; display:flex; pointer-events:auto; background:#fff;`
   }
 
@@ -131,14 +161,14 @@
 
 <!-- Overlay layer: transparent to pointer events except where a browser webview
      sits, so the OWUI guest keeps receiving clicks everywhere else. -->
-<div class="pointer-events-none absolute inset-0 z-30">
+<div bind:this={containerEl} class="pointer-events-none absolute inset-0 z-30 overflow-hidden">
   {#each $browserTabs as tab (tab.tabId)}
     <webview
       src={tab.initialUrl}
       partition={BROWSER_PARTITION}
       allowpopups
       class="border-none"
-      style={styleFor(tab)}
+      style={styleFor(tab, cw, ch)}
       use:wireWebview={tab.tabId}
     ></webview>
   {/each}

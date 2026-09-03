@@ -1,9 +1,99 @@
 <script lang="ts">
   import { fade } from 'svelte/transition'
+  import { onMount, onDestroy } from 'svelte'
   import i18n from '../../../i18n'
   import { tooltip } from '../../../actions/tooltip'
   import { appInfo } from '../../../stores'
   import trayIcon from '../../../../../../../resources/tray.png'
+
+  // ── Updater status (always-visible so a launch-time update never stays silent) ──
+  type UpdateStatus =
+    | 'idle'
+    | 'checking'
+    | 'available'
+    | 'downloading'
+    | 'downloaded'
+    | 'up-to-date'
+    | 'error'
+  let updateStatus: UpdateStatus = $state('idle')
+  let updateVersion: string | null = $state(null)
+  let downloadPercent = $state(0)
+  let cleanupData: (() => void) | null = null
+
+  const updateBusy = $derived(updateStatus === 'checking' || updateStatus === 'downloading')
+  const updateActionable = $derived(updateStatus === 'available' || updateStatus === 'downloaded')
+
+  function onUpdateClick(): void {
+    if (updateBusy) return
+    if (updateStatus === 'available') {
+      updateStatus = 'downloading'
+      downloadPercent = 0
+      void window.electronAPI?.downloadUpdate?.()
+      return
+    }
+    if (updateStatus === 'downloaded') {
+      window.electronAPI?.installUpdate?.()
+      return
+    }
+    // idle / up-to-date / error → (re)check
+    updateStatus = 'checking'
+    void window.electronAPI?.checkForUpdates?.()
+  }
+
+  const updateTip = $derived(
+    updateStatus === 'available'
+      ? $i18n.t('statusBar.updateAvailable', { version: updateVersion ?? '' })
+      : updateStatus === 'downloading'
+        ? $i18n.t('statusBar.updateDownloading', { percent: downloadPercent })
+        : updateStatus === 'downloaded'
+          ? $i18n.t('statusBar.updateReady')
+          : updateStatus === 'checking'
+            ? $i18n.t('statusBar.updateChecking')
+            : updateStatus === 'up-to-date'
+              ? $i18n.t('statusBar.updateUpToDate')
+              : updateStatus === 'error'
+                ? $i18n.t('statusBar.updateError')
+                : $i18n.t('statusBar.checkForUpdates')
+  )
+
+  onMount(() => {
+    cleanupData = window.electronAPI?.onData?.((data: any) => {
+      switch (data?.type) {
+        case 'update:checking':
+          updateStatus = 'checking'
+          break
+        case 'update:available':
+          updateStatus = 'available'
+          updateVersion = data.data?.version ?? null
+          break
+        case 'update:not-available':
+          updateStatus = 'up-to-date'
+          break
+        case 'update:download-progress':
+          updateStatus = 'downloading'
+          downloadPercent = Math.round(data.data?.percent ?? 0)
+          break
+        case 'update:downloaded':
+          updateStatus = 'downloaded'
+          downloadPercent = 100
+          break
+        case 'update:error':
+          updateStatus = 'error'
+          break
+      }
+    }) ?? null
+    // The launch-time check in main can fire before this subscribes, so a ready
+    // update would never show. Re-check shortly after mount so the always-visible
+    // status bar reflects real state (this is why an update looked "silent").
+    setTimeout(() => {
+      try {
+        void window.electronAPI?.checkForUpdates?.()
+      } catch {
+        /* no updater in this context */
+      }
+    }, 1500)
+  })
+  onDestroy(() => cleanupData?.())
 
   interface Props {
     serverStatus: string | undefined
@@ -176,6 +266,33 @@
   </button>
   {/if}
 
-  <!-- Version (right-aligned) -->
-  <span class="ml-auto text-[10px] opacity-25 select-none">v{$appInfo?.version ?? ''}</span>
+  <!-- Version + update check (right-aligned) -->
+  <div class="ml-auto flex items-center gap-1">
+    <button
+      class="flex items-center justify-center rounded-md p-1 border-none bg-transparent cursor-pointer transition-all {updateActionable
+        ? 'text-sky-500 dark:text-sky-400 opacity-90 hover:opacity-100'
+        : 'text-[#1d1d1f] dark:text-[#fafafa] opacity-25 hover:opacity-70 hover:bg-black/[0.04] dark:hover:bg-white/[0.06]'}"
+      onclick={onUpdateClick}
+      use:tooltip={updateTip}
+      aria-label={$i18n.t('statusBar.checkForUpdates')}
+    >
+      {#if updateBusy}
+        <!-- spinner (checking / downloading) -->
+        <svg class="w-3 h-3 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" stroke-dasharray="31.4 31.4" stroke-linecap="round" />
+        </svg>
+      {:else}
+        <!-- refresh / arrow-path wheel -->
+        <svg class="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992V4.356M2.985 19.644v-4.992h4.992m-4.053-4.05a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0 4.99a8.25 8.25 0 0 1-13.803 3.7l-3.181-3.182" />
+        </svg>
+      {/if}
+      {#if updateActionable}
+        <span class="ml-1 text-[10px] leading-none">
+          {updateStatus === 'downloaded' ? $i18n.t('statusBar.updateRestart') : $i18n.t('common.update')}
+        </span>
+      {/if}
+    </button>
+    <span class="text-[10px] opacity-25 select-none">v{$appInfo?.version ?? ''}</span>
+  </div>
 </div>
