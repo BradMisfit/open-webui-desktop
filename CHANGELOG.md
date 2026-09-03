@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.2] - 2026-09-03
+
+Custom BradMisfit build. Adds the **Browser Workspace** and the **Web Security /
+Pentest Workspace** to the visible right-side workspace, on top of the existing
+Remote Workspace and GitHub Device-Flow bridge.
+
+### Added
+
+- **Browser Workspace (P1 + P2).** A visible, controllable web-browsing surface in
+  the right-side workspace (sibling `<webview>` + main-process bridge). P1 manual
+  navigation/controls; P2 AI-driven actions (`browser_action`) available to both
+  Normal Chat and the Work Agent on the same visible session.
+- **Web Security / Pentest Workspace (Phases A–E)** — an AI-assisted Burp/ZAP +
+  DevTools built on the Browser Workspace using CDP (`webContents.debugger`) +
+  `webRequest`, with no proxy, no hidden browser, and a fail-closed authorized
+  **Scope** as the backbone:
+  - **A** — capture engine (bounded/redacted), HTTP History, Site Map, Scope, and
+    Chromium DevTools, plus read-only `websec` AI inspection.
+  - **B** — Intercept (CDP `Fetch` pause/forward/drop/edit) + Repeater
+    (scope-gated, protected-auth reuse without exposing secrets).
+  - **C** — WebSocket inspection + scope-gated WS repeater, and an API Inspector
+    (REST/JSON/GraphQL from traffic + OpenAPI import).
+  - **D** — Controlled Fuzzer (hard-bounded, rate-limited, cancelable), passive
+    analysis (headers/CSP/CORS/cookies/secrets/source-maps), and Findings/Reports.
+  - **E** — active-testing modules (reflected XSS, SQLi, open redirect, path
+    traversal, header audit — authorized + scope-gated) and confirmation-gated,
+    model-redacted AI operations (`replay_request`, `controlled_fuzz`,
+    `passive_scan`, findings) on the `websec` capability.
+
+App identity (`com.openwebui.desktop`), the custom updater feed, Remote Workspace,
+and the GitHub Device-Flow bridge are unchanged.
+
 ## [0.0.20] - 2026-05-07
 
 ### Fixed
