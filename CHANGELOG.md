@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.5] - 2026-09-04
+
+### Added
+
+- **Download to device works properly.** Prepared Video Workspace downloads are
+  now saved through an allowlisted native "Save As" bridge in the main process
+  (`video:download` IPC → preload API), instead of relying only on the browser's
+  download path. The renderer requests the save and the shell writes the prepared
+  file to the location the user picks. No new permissions or remote access; the
+  temporary server copy is still lease-protected and cleaned up as before.
+
 ## [0.0.22-bradmisfit.4] - 2026-09-03
 
 ### Fixed
