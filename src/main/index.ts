@@ -19,7 +19,10 @@ import {
   webContents
 } from 'electron'
 import path, { join } from 'path'
-import { readFile, statfs } from 'fs/promises'
+import { readFile, statfs, unlink } from 'fs/promises'
+import { createWriteStream } from 'fs'
+import { pipeline } from 'stream/promises'
+import { Readable } from 'stream'
 
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 
@@ -1622,6 +1625,36 @@ if (!gotTheLock) {
     })
     ipcMain.handle('workspace:status', () => remoteWorkspaceService?.publicStatus() ?? {
       protocol: 1, device_id: null, connected: false, workspaces: []
+    })
+    // A remote WebUI may ask for this one, authenticated, server-generated
+    // video transfer.  It cannot choose a filesystem path, host, token, or
+    // arbitrary API route: native Save As remains entirely user-controlled.
+    ipcMain.handle('video:download', async (_event, request: { path?: string, filename?: string } = {}) => {
+      const transferPath = String(request.path || '')
+      if (!/^\/api\/v1\/video\/jobs\/[A-Za-z0-9_-]+\/content$/.test(transferPath)) {
+        return { ok: false, code: 'VIDEO_DOWNLOAD_INVALID', detail: 'This video download request is invalid.' }
+      }
+      const connection = await getDefaultConnection()
+      if (!connection || !AUTH_TOKEN) return { ok: false, code: 'VIDEO_DOWNLOAD_AUTH', detail: 'Sign in to save this download.' }
+      const filename = path.basename(String(request.filename || 'video-download.mp4')).replace(/[^A-Za-z0-9._ -]/g, '-') || 'video-download.mp4'
+      const selected = await dialog.showSaveDialog({
+        title: 'Save video to your device',
+        defaultPath: filename,
+        buttonLabel: 'Save video',
+        properties: ['createDirectory', 'showOverwriteConfirmation']
+      })
+      if (selected.canceled || !selected.filePath) return { ok: false, code: 'VIDEO_DOWNLOAD_CANCELLED', detail: 'Save cancelled.' }
+      try {
+        const response = await fetch(`${resolveConnectionUrl(connection).replace(/\/$/, '')}${transferPath}`, {
+          headers: { Authorization: `Bearer ${AUTH_TOKEN}` }
+        })
+        if (!response.ok || !response.body) throw new Error('Video transfer is unavailable.')
+        await pipeline(Readable.fromWeb(response.body as any), createWriteStream(selected.filePath, { flags: 'w' }))
+        return { ok: true, filename }
+      } catch (_error) {
+        await unlink(selected.filePath).catch(() => undefined)
+        return { ok: false, code: 'VIDEO_DOWNLOAD_FAILED', detail: 'Desktop could not save this download.' }
+      }
     })
     // GitHub Device Flow navigation is deliberately separate from the broad
     // Desktop renderer API. The embedded remote page can request one exact

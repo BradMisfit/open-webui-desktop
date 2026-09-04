@@ -365,6 +365,10 @@
                   launch_url: String(request?.launch_url ?? '')
                 }),
                 'workspace:status': () => window.electronAPI.workspaceStatus(),
+                'video:download': (request) => window.electronAPI.videoDownload({
+                  path: String(request?.path ?? ''),
+                  filename: String(request?.filename ?? '')
+                }),
                 // OAuth Device Flow may open only GitHub's fixed verification
                 // page. The webview never receives a general shell/open URL
                 // operation, device code, or access token.
@@ -373,7 +377,7 @@
                 )
               }
               const isRestrictedGuestRequest = typeof requestData.type === 'string'
-                && (requestData.type.startsWith('workspace:') || requestData.type === 'github:authorize-device')
+                && (requestData.type.startsWith('workspace:') || requestData.type === 'github:authorize-device' || requestData.type === 'video:download')
               const response = isRestrictedGuestRequest
                 ? await (workspaceHandlers[requestData.type]
                     ? workspaceHandlers[requestData.type](requestData)
@@ -391,7 +395,7 @@
               // requests. The guest never receives an exception
               // object, local path, or implementation details.
               if (requestData._requestId && typeof requestData.type === 'string'
-                && (requestData.type.startsWith('workspace:') || requestData.type === 'github:authorize-device')) {
+                && (requestData.type.startsWith('workspace:') || requestData.type === 'github:authorize-device' || requestData.type === 'video:download')) {
                 const failure = e as { code?: unknown; detail?: unknown; message?: unknown }
                 wv.send('desktop:response', {
                   _responseId: requestData._requestId,
