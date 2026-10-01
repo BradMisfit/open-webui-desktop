@@ -212,3 +212,84 @@ test('a failed first enrollment remains retryable and does not mistake a saved d
   assert.equal(client.config.enrolled_endpoint, undefined)
   assert.equal(client.config.endpoint, undefined)
 })
+
+// A relay socket that completes the handshake and answers heartbeats until it
+// goes silent (simulating a relay that dropped the session with no close frame).
+const relaySocket = (state) => {
+  const socket = {
+    readyState: 1,
+    onmessage: null,
+    onclose: null,
+    closed: false,
+    sent: [],
+    send(frame) {
+      socket.sent.push(frame)
+      const request = JSON.parse(frame)
+      const reply = (value) => setTimeout(() => socket.onmessage?.({ data: JSON.stringify(value) }), 0)
+      if (request.type === 'pair') reply({ type: 'paired', device_id: request.device_id })
+      if (request.type === 'authenticate') reply({ type: 'authenticated', device_id: request.device_id })
+      if (request.type === 'heartbeat' && !state.silent) reply({ type: 'heartbeat_ack' })
+    },
+    close() { socket.closed = true; socket.readyState = 3 }
+  }
+  return socket
+}
+
+const connectingClient = (configPath, sockets, state, options = {}) => new RemoteWorkspaceClient({
+  configPath,
+  heartbeatMs: 20, staleMs: 80, reconnectBaseMs: 10, reconnectMaxMs: 40,
+  ...options,
+  connectSocket: async () => {
+    if (state.unreachable) throw new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'unreachable')
+    const socket = relaySocket(state)
+    sockets.push(socket)
+    setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'challenge', nonce: Buffer.alloc(32).toString('base64url'), protocol: REMOTE_WORKSPACE_PROTOCOL }) }), 0)
+    return socket
+  }
+})
+
+const waitFor = async (predicate, ms = 2000) => {
+  const deadline = Date.now() + ms
+  while (!predicate()) {
+    if (Date.now() > deadline) throw new Error('condition not reached')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+test('a connected client sends heartbeats and stays connected while the relay answers', async () => {
+  const sockets = []
+  const state = { silent: false }
+  const client = connectingClient(path.join(temporaryRoot(), 'config.json'), sockets, state)
+  await client.open('wss://example.test/relay', { pairId: 'rwp_' + 'a'.repeat(32), code: 'x'.repeat(20) })
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  assert.ok(sockets[0].sent.some((frame) => JSON.parse(frame).type === 'heartbeat'))
+  assert.equal(sockets.length, 1)
+  assert.equal(client.connected, true)
+  client.stopHeartbeat()
+})
+
+test('a silent link (relay dropped the session, no close frame) is detected and reconnected', async () => {
+  const sockets = []
+  const state = { silent: false }
+  const client = connectingClient(path.join(temporaryRoot(), 'config.json'), sockets, state)
+  await client.open('wss://example.test/relay', { pairId: 'rwp_' + 'a'.repeat(32), code: 'x'.repeat(20) })
+  state.silent = true
+  await waitFor(() => sockets.length >= 2 && client.connected)
+  assert.equal(sockets[0].closed, true)
+  state.silent = false
+  client.stopHeartbeat()
+})
+
+test('a failed resume at startup keeps retrying instead of staying offline', async () => {
+  const sockets = []
+  const state = { silent: false, unreachable: true }
+  const configPath = path.join(temporaryRoot(), 'config.json')
+  const seed = connectingClient(configPath, [], { silent: false })
+  await seed.open('wss://example.test/relay', { pairId: 'rwp_' + 'a'.repeat(32), code: 'x'.repeat(20) })
+  seed.stopHeartbeat()
+  const client = connectingClient(configPath, sockets, state)
+  await assert.rejects(client.resume())
+  state.unreachable = false
+  await waitFor(() => client.connected)
+  client.stopHeartbeat()
+})

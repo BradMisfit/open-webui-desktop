@@ -144,10 +144,23 @@ const rawEd25519PublicKey = (privateKey) => {
 }
 
 export class RemoteWorkspaceClient {
-  constructor({ configPath, platform = process.platform, hostname = os.hostname(), connectSocket = null, onStateChange = () => {} }) {
+  constructor({
+    configPath, platform = process.platform, hostname = os.hostname(), connectSocket = null, onStateChange = () => {},
+    heartbeatMs = 15000, staleMs = 45000, reconnectBaseMs = 1000, reconnectMaxMs = 15000
+  }) {
     this.configPath = configPath
     this.platform = platform
     this.hostname = hostname
+    // Liveness: the relay answers every heartbeat, so a link that has delivered
+    // nothing for staleMs is dead even if the socket still looks open (the relay
+    // may have dropped the session without a close frame reaching us).
+    this.heartbeatMs = heartbeatMs
+    this.staleMs = staleMs
+    this.reconnectBaseMs = reconnectBaseMs
+    this.reconnectMaxMs = reconnectMaxMs
+    this.reconnectDelay = reconnectBaseMs
+    this.heartbeatTimer = null
+    this.lastMessageAt = 0
     this.connectSocket = connectSocket || defaultSocket
     this.onStateChange = onStateChange
     this.config = this.load()
@@ -256,7 +269,17 @@ export class RemoteWorkspaceClient {
   async selectFolder() { throw new RemoteWorkspaceError('FOLDER_PICKER_UNAVAILABLE', 'the native folder picker is unavailable') }
 
   async resume() {
-    if (this.config.enrolled_endpoint && this.config.device_id) await this.connect(this.config.enrolled_endpoint)
+    const endpoint = this.config.enrolled_endpoint
+    if (!endpoint || !this.config.device_id) return
+    try {
+      await this.connect(endpoint)
+    } catch (error) {
+      // The relay may be briefly unreachable when the app starts (e.g. while the
+      // Work Agent runtime is being updated). Keep retrying in the background
+      // instead of staying offline until the user reconnects by hand.
+      this.scheduleReconnect(endpoint)
+      throw error
+    }
   }
 
   async connect(endpoint, pairing = {}) {
@@ -313,9 +336,11 @@ export class RemoteWorkspaceClient {
         this.save()
       }
       this.connected = true
+      this.reconnectDelay = this.reconnectBaseMs
       this.onStateChange(this.publicStatus())
       for (const grant of this.policy.grants.values()) sendJson(socket, { type: 'workspace_register', ...grant })
       this.listen(socket, endpoint)
+      this.startHeartbeat(socket, endpoint)
     } catch (error) {
       this.connected = false
       this.onStateChange(this.publicStatus())
@@ -332,6 +357,7 @@ export class RemoteWorkspaceClient {
 
   listen(socket, endpoint) {
     socket.onmessage = async (event) => {
+      if (this.socket === socket) this.lastMessageAt = Date.now()
       let message
       try { message = JSON.parse(await messageText(event.data)) } catch { return }
       if (message?.type !== 'operation') return
@@ -345,8 +371,37 @@ export class RemoteWorkspaceClient {
       }
       sendJson(socket, { type: 'result', request_id: message.request_id, result })
     }
-    socket.onclose = () => this.scheduleReconnect(endpoint)
+    socket.onclose = () => {
+      if (this.socket === socket) this.stopHeartbeat()
+      this.scheduleReconnect(endpoint)
+    }
     socket.onerror = () => undefined
+  }
+
+  startHeartbeat(socket, endpoint) {
+    this.stopHeartbeat()
+    this.lastMessageAt = Date.now()
+    this.heartbeatTimer = setInterval(() => {
+      if (this.socket !== socket) { this.stopHeartbeat(); return }
+      if (Date.now() - this.lastMessageAt > this.staleMs) { this.dropDeadLink(socket, endpoint); return }
+      try { sendJson(socket, { type: 'heartbeat' }) } catch { this.dropDeadLink(socket, endpoint) }
+    }, this.heartbeatMs)
+    this.heartbeatTimer.unref?.()
+  }
+
+  stopHeartbeat() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+    this.heartbeatTimer = null
+  }
+
+  // A silent link is treated as lost: close it and reconnect, even though the
+  // socket never reported a close.
+  dropDeadLink(socket, endpoint) {
+    this.stopHeartbeat()
+    if (this.socket === socket) this.socket = null
+    socket.onclose = null
+    try { socket.close() } catch {}
+    this.scheduleReconnect(endpoint)
   }
 
   scheduleReconnect(endpoint) {
@@ -354,10 +409,13 @@ export class RemoteWorkspaceClient {
     this.connected = false
     this.onStateChange(this.publicStatus())
     if (this.reconnectTimer) return
+    const delay = this.reconnectDelay
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.reconnectMaxMs)
     this.reconnectTimer = setTimeout(async () => {
       this.reconnectTimer = null
       try { await this.connect(endpoint) } catch { this.scheduleReconnect(endpoint) }
-    }, 1000)
+    }, delay)
+    this.reconnectTimer.unref?.()
   }
 
   async operation(workspaceId, operation, operationArgs, timeout, requestId = '') {

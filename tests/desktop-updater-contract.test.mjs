@@ -29,8 +29,12 @@ test('custom updater feed is application-controlled and never targets vanilla up
     assert.match(source, /repo:\s*open-webui-desktop|repo:\s*'open-webui-desktop'/)
     assert.doesNotMatch(source, /owner:\s*open-webui|repo:\s*desktop\s*$/m)
   }
-  assert.equal(packageJson.version, '0.0.21-bradmisfit.1')
+  // The release version must use the custom feed form and be identical in the
+  // lockfile (both spots), which electron-builder and the updater rely on.
   assert.match(packageJson.version, CUSTOM_VERSION)
+  const lock = JSON.parse(read('package-lock.json'))
+  assert.equal(lock.version, packageJson.version)
+  assert.equal(lock.packages?.['']?.version, packageJson.version)
   assert.match(about, /https:\/\/github\.com\/BradMisfit\/open-webui-desktop\/releases/)
   assert.doesNotMatch(about, /https:\/\/github\.com\/open-webui\/desktop/)
 })

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.6] - 2026-10-01
+
+### Fixed
+
+- **Remote Workspace no longer gets stuck "offline".** The Desktop client now
+  sends a heartbeat every 15 seconds and treats a link that has gone silent for
+  45 seconds as lost, closing it and reconnecting automatically. Previously, if
+  the Work Agent relay dropped the session without a close frame, Desktop kept
+  believing it was connected and never reconnected until you did it by hand.
+- **Reconnects back off sensibly** (1s, 2s, 4s… up to 15s) instead of retrying
+  every second forever.
+- **Startup retries.** If the relay is unreachable when Desktop starts (for
+  example while the Work Agent runtime is being updated), it keeps retrying in
+  the background instead of staying offline.
+
 ## [0.0.22-bradmisfit.5] - 2026-09-04
 
 ### Added
