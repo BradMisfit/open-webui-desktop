@@ -365,6 +365,9 @@
                   launch_url: String(request?.launch_url ?? '')
                 }),
                 'workspace:status': () => window.electronAPI.workspaceStatus(),
+                'workspace:location': (request) => window.electronAPI.workspaceLocation({
+                  workspace_id: String(request?.workspace_id ?? '')
+                }),
                 'video:download': (request) => window.electronAPI.videoDownload({
                   path: String(request?.path ?? ''),
                   filename: String(request?.filename ?? '')

@@ -1626,6 +1626,14 @@ if (!gotTheLock) {
     ipcMain.handle('workspace:status', () => remoteWorkspaceService?.publicStatus() ?? {
       protocol: 1, device_id: null, connected: false, workspaces: []
     })
+    ipcMain.handle('workspace:location', (_event, request: { workspace_id?: string } = {}) => {
+      if (!remoteWorkspaceService) return workspaceBridgeFailure('DESKTOP_WORKSPACE_UNAVAILABLE')
+      try {
+        return remoteWorkspaceService.localWorkspaceLocation(String(request.workspace_id || ''))
+      } catch (error) {
+        return workspaceBridgeFailure(error?.code)
+      }
+    })
     // A remote WebUI may ask for this one, authenticated, server-generated
     // video transfer.  It cannot choose a filesystem path, host, token, or
     // arbitrary API route: native Save As remains entirely user-controlled.

@@ -38,10 +38,10 @@ const isInside = (root, candidate) => {
 const isFilesystemRoot = (value) => path.parse(value).root === value
 
 export const capabilitiesForPreset = (preset) => {
-  if (preset === 'read-only') return { read: true }
-  if (preset === 'edit') return { read: true, write: true, create: true, move: true, delete: true }
+  if (preset === 'read-only') return { read: true, remote_project_v1: true }
+  if (preset === 'edit') return { read: true, write: true, create: true, move: true, delete: true, remote_project_v1: true }
   if (preset === 'developer') {
-    return { read: true, write: true, create: true, move: true, delete: true, execute: true, cancel: true, git: true }
+    return { read: true, write: true, create: true, move: true, delete: true, execute: true, cancel: true, git: true, remote_project_v1: true, coding_environment_v1: true }
   }
   throw new RemoteWorkspaceError('PERMISSION_DENIED', 'workspace capability preset is invalid')
 }
@@ -216,6 +216,11 @@ export class RemoteWorkspaceClient {
     }
   }
 
+  localWorkspaceLocation(workspaceId) {
+    const grant = this.policy.grant(String(workspaceId || ''))
+    return { workspace_id: grant.workspace_id, local_path: grant.local_path }
+  }
+
   addWorkspace(displayName, localPath, capabilities) {
     const root = fs.realpathSync.native(localPath)
     if (isFilesystemRoot(root)) throw new RemoteWorkspaceError('PERMISSION_DENIED', 'granting a filesystem root is not allowed')
@@ -338,7 +343,14 @@ export class RemoteWorkspaceClient {
       this.connected = true
       this.reconnectDelay = this.reconnectBaseMs
       this.onStateChange(this.publicStatus())
-      for (const grant of this.policy.grants.values()) sendJson(socket, { type: 'workspace_register', ...grant })
+      for (const grant of this.policy.grants.values()) {
+        const capabilities = {
+          ...grant.capabilities,
+          remote_project_v1: Boolean(grant.capabilities?.read),
+          coding_environment_v1: Boolean(grant.capabilities?.write && grant.capabilities?.execute)
+        }
+        sendJson(socket, { type: 'workspace_register', ...grant, capabilities })
+      }
       this.listen(socket, endpoint)
       this.startHeartbeat(socket, endpoint)
     } catch (error) {
@@ -422,6 +434,10 @@ export class RemoteWorkspaceClient {
     if (['list', 'stat', 'read', 'search'].includes(operation)) this.policy.require(workspaceId, 'read')
     else if (['write', 'edit', 'mkdir', 'move', 'delete'].includes(operation)) this.policy.require(workspaceId, 'write')
     else if (operation === 'command') this.policy.require(workspaceId, 'execute')
+    else if (operation === 'prepare_python_environment') {
+      this.policy.require(workspaceId, 'execute')
+      this.policy.require(workspaceId, 'write')
+    }
     else if (operation === 'command_cancel') this.policy.require(workspaceId, 'cancel')
     else if (operation === 'git') this.policy.require(workspaceId, 'git')
     else throw new RemoteWorkspaceError('PERMISSION_DENIED', 'operation is not supported')
@@ -434,6 +450,7 @@ export class RemoteWorkspaceClient {
     if (operation === 'move') return this.move(workspaceId, operationArgs)
     if (operation === 'delete') return this.delete(workspaceId, operationArgs)
     if (operation === 'search') return this.search(workspaceId, operationArgs)
+    if (operation === 'prepare_python_environment') return this.preparePythonEnvironment(workspaceId, operationArgs, timeout)
     if (operation === 'command') return this.command(workspaceId, operationArgs, timeout, requestId)
     if (operation === 'command_cancel') return this.cancel(operationArgs.request_id)
     return this.git(workspaceId, operationArgs, timeout)
@@ -553,6 +570,56 @@ export class RemoteWorkspaceClient {
     return this.runArgv(workspaceId, argv, String(args.cwd || '.'), timeout, requestId)
   }
 
+  async preparePythonEnvironment(workspaceId, args, timeout) {
+    const root = this.policy.path(workspaceId, String(args.path || '.'), { write: true })
+    const metadataNames = ['pyproject.toml', 'requirements.txt', 'requirements-dev.txt', 'requirements-test.txt']
+    const metadata = metadataNames.flatMap((name) => {
+      const candidate = path.join(root, name)
+      try { return fs.statSync(candidate).size <= 1024 * 1024 ? [fs.readFileSync(candidate, 'utf8')] : [] } catch { return [] }
+    })
+    const testFiles = [
+      ...safeMatchingFiles(root, /^test_.*\.py$/),
+      ...safeMatchingFiles(path.join(root, 'tests'), /^test_.*\.py$/)
+    ]
+    if (!metadata.length && !testFiles.length) {
+      return { ok: true, status: 'NOT_APPLICABLE', detail: 'no Python project or test surface detected' }
+    }
+    const pythonPath = this.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python'
+    const absolutePython = path.join(root, ...pythonPath.split('/'))
+    let created = false
+    if (!fs.existsSync(absolutePython)) {
+      const candidates = this.platform === 'win32'
+        ? [['python', '-m', 'venv', '.venv'], ['py', '-3', '-m', 'venv', '.venv']]
+        : [['python3', '-m', 'venv', '.venv'], ['python', '-m', 'venv', '.venv']]
+      let result = null
+      for (const argv of candidates) {
+        try {
+          result = await this.runArgv(workspaceId, argv, String(args.path || '.'), timeout)
+          if (result.exit_code === 0) break
+        } catch {}
+      }
+      if (!result || result.exit_code !== 0 || !fs.existsSync(absolutePython)) {
+        return { ok: true, status: 'FAILED', stage: 'venv', detail: bounded(result?.stderr || result?.stdout || 'Python could not create a project-local virtual environment', 2000) }
+      }
+      created = true
+    }
+    const needsPytest = Boolean(args.install_test_runner) && (
+      testFiles.length > 0 || metadata.some((value) => value.toLocaleLowerCase().includes('pytest'))
+    )
+    let pytestInstalled = false
+    if (needsPytest) {
+      const probe = await this.runArgv(workspaceId, [pythonPath, '-c', 'import pytest'], String(args.path || '.'), timeout)
+      if (probe.exit_code !== 0) {
+        const install = await this.runArgv(workspaceId, [pythonPath, '-m', 'pip', 'install', 'pytest'], String(args.path || '.'), timeout)
+        if (install.exit_code !== 0) {
+          return { ok: true, status: 'FAILED', stage: 'pytest', detail: bounded(install.stderr || install.stdout, 2000) }
+        }
+        pytestInstalled = true
+      }
+    }
+    return { ok: true, status: 'READY', python: pythonPath, created, pytest_installed: pytestInstalled }
+  }
+
   validateCommandPaths(workspaceId, argv) {
     for (const value of argv.slice(1)) {
       const candidate = value.startsWith('--') && value.includes('=') ? value.split('=', 2)[1] : value
@@ -623,7 +690,24 @@ export class RemoteWorkspaceClient {
   }
 }
 
-export const publicGrant = (grant) => ({ workspace_id: grant.workspace_id, display_name: grant.display_name, capabilities: grant.capabilities, enabled: Boolean(grant.enabled) })
+const safeMatchingFiles = (directory, pattern) => {
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && pattern.test(entry.name))
+      .map((entry) => path.join(directory, entry.name))
+  } catch { return [] }
+}
+
+export const publicGrant = (grant) => ({
+  workspace_id: grant.workspace_id,
+  display_name: grant.display_name,
+  capabilities: {
+    ...grant.capabilities,
+    remote_project_v1: Boolean(grant.capabilities?.read),
+    coding_environment_v1: Boolean(grant.capabilities?.write && grant.capabilities?.execute)
+  },
+  enabled: Boolean(grant.enabled)
+})
 const normalizePath = (value) => process.platform === 'win32' ? path.normalize(value).toLowerCase() : path.normalize(value)
 const slug = (value) => String(value).toLowerCase().replace(/[^a-z0-9_.-]+/g, '-').replace(/^-+|-+$/g, '')
 const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex')

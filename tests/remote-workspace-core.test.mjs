@@ -74,6 +74,22 @@ test('private identity is persistent locally yet status exposes only opaque meta
   assert.equal(JSON.stringify(status).includes(root), false)
 })
 
+test('saved grants advertise isolated sync and project-local tooling without exposing paths', () => {
+  const root = temporaryRoot()
+  const client = new RemoteWorkspaceClient({ configPath: path.join(root, 'config.json') })
+  const grant = client.addWorkspace('Project', root, {
+    read: true, write: true, create: true, execute: true, git: true
+  })
+  const workspace = client.publicStatus().workspaces[0]
+  assert.equal(workspace.capabilities.remote_project_v1, true)
+  assert.equal(workspace.capabilities.coding_environment_v1, true)
+  assert.equal(JSON.stringify(workspace).includes(root), false)
+  assert.deepEqual(client.localWorkspaceLocation(grant.workspace_id), {
+    workspace_id: grant.workspace_id,
+    local_path: root
+  })
+})
+
 test('protocol mismatch fails clearly before any workspace operation', () => {
   const client = new RemoteWorkspaceClient({ configPath: path.join(temporaryRoot(), 'config.json') })
   assert.equal(REMOTE_WORKSPACE_PROTOCOL, 1)

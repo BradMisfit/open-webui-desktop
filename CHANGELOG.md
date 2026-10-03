@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.7] - 2026-10-03
+
+### Fixed
+
+- Synced Folder grants now advertise isolated snapshot/sync support for both
+  newly selected and already saved folders.
+- Full Access can prepare a project-local Python environment for a selected
+  This Computer folder without installing test tooling globally.
+- Open WebUI can request the selected folder path only through a narrow local
+  Desktop bridge for its hover tooltip; the path is not included in server
+  registration or ordinary public status.
+
 ## [0.0.22-bradmisfit.6] - 2026-10-01
 
 ### Fixed
