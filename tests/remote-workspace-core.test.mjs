@@ -15,6 +15,7 @@ import {
 } from '../src/main/remote-workspace-core.mjs'
 
 const temporaryRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'owui-desktop-workspace-'))
+const sha256ForTest = (value) => crypto.createHash('sha256').update(value).digest('hex')
 const launch = (endpoint = 'wss://work.example.test/v1/remote-workspaces/client/connect') =>
   `work-agent://browse?endpoint=${encodeURIComponent(endpoint)}&pair_id=rwp_${'a'.repeat(32)}&code=${'x'.repeat(24)}&preset=developer`
 
@@ -92,8 +93,46 @@ test('saved grants advertise isolated sync and project-local tooling without exp
 
 test('protocol mismatch fails clearly before any workspace operation', () => {
   const client = new RemoteWorkspaceClient({ configPath: path.join(temporaryRoot(), 'config.json') })
-  assert.equal(REMOTE_WORKSPACE_PROTOCOL, 1)
-  assert.throws(() => client.assertProtocol(2), (error) => error instanceof RemoteWorkspaceError && error.code === 'DESKTOP_UPDATE_REQUIRED')
+  assert.equal(REMOTE_WORKSPACE_PROTOCOL, 2)
+  assert.throws(() => client.assertProtocol(1), (error) => error instanceof RemoteWorkspaceError && error.code === 'DESKTOP_UPDATE_REQUIRED')
+})
+
+test('Synced Folder snapshot and transactional copy-back use the advertised protocol', async () => {
+  const root = temporaryRoot()
+  const configRoot = temporaryRoot()
+  fs.mkdirSync(path.join(root, 'src'))
+  fs.mkdirSync(path.join(root, 'node_modules'))
+  fs.writeFileSync(path.join(root, 'src', 'app.py'), 'before\n')
+  fs.writeFileSync(path.join(root, '.env'), 'secret=true\n')
+  fs.writeFileSync(path.join(root, 'node_modules', 'generated.js'), 'generated\n')
+  const client = new RemoteWorkspaceClient({ configPath: path.join(configRoot, 'config.json') })
+  const grant = client.addWorkspace('Project', root, capabilitiesForPreset('developer'))
+
+  const manifest = await client.operation(grant.workspace_id, 'snapshot_manifest', { page_size: 1 }, 30)
+  assert.equal(manifest.schema, 'remote_project_manifest_v1')
+  assert.equal(manifest.file_count, 1)
+  assert.deepEqual(manifest.entries.map((item) => item.path), ['src/app.py'])
+  assert.equal(manifest.excluded.some((item) => item.path === '.env' && item.reason === 'secret'), true)
+  assert.equal(manifest.excluded.some((item) => item.path === 'node_modules' && item.reason === 'generated'), true)
+
+  const read = await client.operation(grant.workspace_id, 'read', { path: 'src/app.py', offset: 0, limit: 65536 }, 30)
+  assert.equal(Buffer.from(read.content_b64, 'base64').toString('utf8'), 'before\n')
+
+  const before = sha256ForTest(Buffer.from('before\n'))
+  const afterContent = Buffer.from('after\n')
+  const after = sha256ForTest(afterContent)
+  const transactionId = 'a'.repeat(32)
+  await client.operation(grant.workspace_id, 'sync_begin', {
+    transaction_id: transactionId,
+    changes: [{ path: 'src/app.py', action: 'write', base_sha256: before, final_sha256: after, size: afterContent.length }]
+  }, 30)
+  await client.operation(grant.workspace_id, 'sync_write', {
+    transaction_id: transactionId, path: 'src/app.py', offset: 0,
+    content_b64: afterContent.toString('base64'), content_sha256: after
+  }, 30)
+  const committed = await client.operation(grant.workspace_id, 'sync_commit', { transaction_id: transactionId }, 30)
+  assert.equal(committed.state, 'COMMITTED')
+  assert.equal(fs.readFileSync(path.join(root, 'src', 'app.py'), 'utf8'), 'after\n')
 })
 
 test('Desktop pair and reconnect frames identify the protocol-bearing client', async () => {

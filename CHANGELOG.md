@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.8] - 2026-10-04
+
+### Fixed
+
+- Synced Folder now implements the bounded snapshot and transactional copy-back
+  operations used by isolated AI-server execution instead of advertising an
+  operation surface that Desktop could not serve.
+- Desktop and the Work Agent relay negotiate protocol 2 so an older client
+  fails with a clear update requirement before a task can enter staging.
+
 ## [0.0.22-bradmisfit.7] - 2026-10-03
 
 ### Fixed

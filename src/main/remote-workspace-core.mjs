@@ -10,9 +10,11 @@ import crypto from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 
-export const REMOTE_WORKSPACE_PROTOCOL = 1
+// Protocol 2 is the first Desktop protocol that implements the complete
+// remote_project_v1 snapshot and transactional sync surface it advertises.
+export const REMOTE_WORKSPACE_PROTOCOL = 2
 export const REMOTE_WORKSPACE_DESKTOP_CLIENT_KIND = 'open-webui-desktop'
 
 export class RemoteWorkspaceError extends Error {
@@ -166,10 +168,12 @@ export class RemoteWorkspaceClient {
     this.config = this.load()
     this.policy = new WorkspacePolicy(this.config.workspaces || [])
     this.processes = new Map()
+    this.snapshots = new Map()
     this.socket = null
     this.connected = false
     this.connecting = null
     this.reconnectTimer = null
+    this.recoverSyncTransactions()
   }
 
   load() {
@@ -431,8 +435,8 @@ export class RemoteWorkspaceClient {
   }
 
   async operation(workspaceId, operation, operationArgs, timeout, requestId = '') {
-    if (['list', 'stat', 'read', 'search'].includes(operation)) this.policy.require(workspaceId, 'read')
-    else if (['write', 'edit', 'mkdir', 'move', 'delete'].includes(operation)) this.policy.require(workspaceId, 'write')
+    if (['list', 'stat', 'read', 'snapshot_manifest', 'search'].includes(operation)) this.policy.require(workspaceId, 'read')
+    else if (['write', 'edit', 'mkdir', 'move', 'delete', 'sync_begin', 'sync_write', 'sync_commit', 'sync_abort'].includes(operation)) this.policy.require(workspaceId, 'write')
     else if (operation === 'command') this.policy.require(workspaceId, 'execute')
     else if (operation === 'prepare_python_environment') {
       this.policy.require(workspaceId, 'execute')
@@ -444,6 +448,11 @@ export class RemoteWorkspaceClient {
     if (operation === 'list') return this.list(workspaceId, operationArgs)
     if (operation === 'stat') return this.stat(workspaceId, operationArgs)
     if (operation === 'read') return this.read(workspaceId, operationArgs)
+    if (operation === 'snapshot_manifest') return this.snapshotManifest(workspaceId, operationArgs)
+    if (operation === 'sync_begin') return this.syncBegin(workspaceId, operationArgs)
+    if (operation === 'sync_write') return this.syncWrite(workspaceId, operationArgs)
+    if (operation === 'sync_commit') return this.syncCommit(workspaceId, operationArgs)
+    if (operation === 'sync_abort') return this.syncAbort(workspaceId, operationArgs)
     if (operation === 'write') return this.write(workspaceId, operationArgs)
     if (operation === 'edit') return this.edit(workspaceId, operationArgs)
     if (operation === 'mkdir') return this.mkdir(workspaceId, operationArgs)
@@ -487,7 +496,271 @@ export class RemoteWorkspaceClient {
     const bytes = fs.readSync(descriptor, data, 0, limit, offset)
     fs.closeSync(descriptor)
     const content = data.subarray(0, bytes)
-    return { ok: true, path: String(args.path), content: content.toString('utf8'), offset, next_offset: offset + bytes, total_bytes: fs.statSync(target).size, bytes, content_sha256: sha256(content) }
+    return { ok: true, path: String(args.path), content: content.toString('utf8'), content_b64: content.toString('base64'), offset, next_offset: offset + bytes, total_bytes: fs.statSync(target).size, bytes, content_sha256: sha256(content) }
+  }
+
+  snapshotExcluded(relative, directory) {
+    const parts = new Set(String(relative).split('/').map((item) => item.toLocaleLowerCase()))
+    const generated = new Set(['.git', '.venv', 'venv', 'node_modules', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache', '.svelte-kit', 'dist', 'build', 'target'])
+    if ([...parts].some((item) => generated.has(item))) return 'generated'
+    if (directory) return null
+    const name = path.posix.basename(relative).toLocaleLowerCase()
+    if (name === '.env' || (name.startsWith('.env.') && !['.env.example', '.env.sample'].includes(name))) return 'secret'
+    if (['id_rsa', 'id_ed25519', 'credentials', 'credentials.json'].includes(name)) return 'secret'
+    if (['.pem', '.key', '.p12', '.pfx'].includes(path.posix.extname(name))) return 'secret'
+    return null
+  }
+
+  snapshotManifest(workspaceId, args) {
+    const now = Date.now()
+    for (const [id, item] of this.snapshots.entries()) {
+      if (now - item.createdAt > 10 * 60 * 1000) this.snapshots.delete(id)
+    }
+    const snapshotId = String(args.snapshot_id || '')
+    const offset = Math.max(0, Number(args.offset || 0))
+    const pageSize = clamp(args.page_size, 1, 250, 250)
+    if (snapshotId) {
+      const cached = this.snapshots.get(snapshotId)
+      if (!cached) throw new RemoteWorkspaceError('SNAPSHOT_EXPIRED', 'project snapshot expired; restart staging')
+      if (cached.workspaceId !== workspaceId) throw new RemoteWorkspaceError('PERMISSION_DENIED', 'snapshot belongs to another workspace')
+      const page = cached.manifest.entries.slice(offset, offset + pageSize)
+      const nextOffset = offset + page.length
+      const { entries: _entries, ...metadata } = cached.manifest
+      const result = { ...metadata, entries: page, offset, next_offset: nextOffset, complete: nextOffset >= cached.manifest.entries.length }
+      if (result.complete) this.snapshots.delete(snapshotId)
+      return result
+    }
+
+    const root = this.policy.path(workspaceId, '.')
+    const maxFiles = clamp(args.max_files, 1, 5000, 5000)
+    const maxTotal = clamp(args.max_total_bytes, 1, 256 * 1024 * 1024, 256 * 1024 * 1024)
+    const maxFile = clamp(args.max_file_bytes, 1, 16 * 1024 * 1024, 16 * 1024 * 1024)
+    const entries = []
+    const excluded = []
+    let total = 0
+    const visit = (directory) => {
+      for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+        const candidate = path.join(directory, entry.name)
+        const relative = path.relative(root, candidate).split(path.sep).join('/')
+        const info = fs.lstatSync(candidate)
+        const reason = info.isSymbolicLink() ? 'link' : this.snapshotExcluded(relative, info.isDirectory())
+        if (reason) {
+          if (excluded.length < 200) excluded.push({ path: relative, reason })
+          continue
+        }
+        if (info.isDirectory()) {
+          visit(candidate)
+          continue
+        }
+        if (!info.isFile()) continue
+        if (info.size > maxFile) {
+          if (excluded.length < 200) excluded.push({ path: relative, reason: 'file_too_large' })
+          continue
+        }
+        if (entries.length >= maxFiles || total + info.size > maxTotal) {
+          throw new RemoteWorkspaceError('PROJECT_TOO_LARGE', 'selected project exceeds the bounded snapshot limits')
+        }
+        entries.push({ path: relative, size: info.size, mtime_ns: Math.round(info.mtimeMs * 1e6), sha256: sha256(fs.readFileSync(candidate)) })
+        total += info.size
+      }
+    }
+    visit(root)
+
+    let repository = { is_git: false, branch: '', head: '' }
+    if (fs.existsSync(path.join(root, '.git'))) {
+      const git = (...argv) => {
+        const result = spawnSync('git', argv, { cwd: root, shell: false, windowsHide: true, encoding: 'utf8', timeout: 15000 })
+        return result.status === 0 ? String(result.stdout || '').trim() : ''
+      }
+      const top = git('rev-parse', '--show-toplevel')
+      try {
+        if (top && normalizePath(fs.realpathSync.native(top)) === normalizePath(fs.realpathSync.native(root))) {
+          repository = { is_git: true, branch: git('branch', '--show-current').slice(0, 240), head: git('rev-parse', 'HEAD').slice(0, 64) }
+        }
+      } catch {}
+    }
+    const id = crypto.randomUUID().replace(/-/g, '')
+    const manifest = { ok: true, schema: 'remote_project_manifest_v1', snapshot_id: id, entries, excluded, excluded_truncated: excluded.length >= 200, file_count: entries.length, total_bytes: total, repository }
+    this.snapshots.set(id, { createdAt: now, workspaceId, manifest })
+    const page = entries.slice(0, pageSize)
+    const { entries: _entries, ...metadata } = manifest
+    const result = { ...metadata, entries: page, offset: 0, next_offset: page.length, complete: page.length >= entries.length }
+    if (result.complete) this.snapshots.delete(id)
+    return result
+  }
+
+  syncRoot() {
+    const root = path.join(path.dirname(this.configPath), 'sync-transactions')
+    fs.mkdirSync(root, { recursive: true, mode: 0o700 })
+    return root
+  }
+
+  syncDirectory(transactionId) {
+    if (!/^[a-f0-9]{32}$/.test(transactionId)) throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'sync transaction id is invalid')
+    return path.join(this.syncRoot(), transactionId)
+  }
+
+  syncFileName(value) { return sha256(Buffer.from(value, 'utf8')) }
+
+  fileSha256(target) {
+    if (!fs.existsSync(target)) return null
+    const info = fs.lstatSync(target)
+    if (info.isSymbolicLink() || !info.isFile()) throw new RemoteWorkspaceError('SYNC_CONFLICT', 'project path is no longer a regular file')
+    return sha256(fs.readFileSync(target))
+  }
+
+  writeSyncJournal(directory, manifest) {
+    const temporary = path.join(directory, 'manifest.tmp')
+    const target = path.join(directory, 'manifest.json')
+    fs.writeFileSync(temporary, JSON.stringify(manifest), { encoding: 'utf8', mode: 0o600 })
+    const descriptor = fs.openSync(temporary, 'r')
+    try { fs.fsyncSync(descriptor) } finally { fs.closeSync(descriptor) }
+    fs.renameSync(temporary, target)
+  }
+
+  loadSync(workspaceId, transactionId) {
+    const directory = this.syncDirectory(transactionId)
+    const journal = path.join(directory, 'manifest.json')
+    if (!fs.existsSync(journal)) throw new RemoteWorkspaceError('WORKSPACE_UNAVAILABLE', 'sync transaction is unavailable')
+    let manifest
+    try { manifest = JSON.parse(fs.readFileSync(journal, 'utf8')) } catch { throw new RemoteWorkspaceError('WORKSPACE_UNAVAILABLE', 'sync transaction is corrupt') }
+    if (manifest.workspace_id !== workspaceId) throw new RemoteWorkspaceError('PERMISSION_DENIED', 'sync transaction belongs to another workspace')
+    return { directory, manifest }
+  }
+
+  syncBegin(workspaceId, args) {
+    const transactionId = String(args.transaction_id || '')
+    const changes = args.changes
+    if (!Array.isArray(changes) || !changes.length || changes.length > 500) throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'sync change set is invalid')
+    const seen = new Set()
+    const normalized = []
+    let total = 0
+    for (const raw of changes) {
+      if (!raw || typeof raw !== 'object') throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'sync change is invalid')
+      const relative = String(raw.path || '')
+      const action = String(raw.action || '')
+      const base = String(raw.base_sha256 || '')
+      const final = String(raw.final_sha256 || '')
+      const size = Number(raw.size || 0)
+      const target = this.policy.path(workspaceId, relative, { write: true })
+      if (seen.has(relative) || !['write', 'delete'].includes(action) || !Number.isInteger(size) || size < 0 || size > 16 * 1024 * 1024) throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'sync change is invalid')
+      if (base && !/^[0-9a-f]{64}$/.test(base)) throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'sync base hash is invalid')
+      if (action === 'write' && !/^[0-9a-f]{64}$/.test(final)) throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'sync final hash is invalid')
+      if (action === 'delete' && (final || size)) throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'delete sync change is invalid')
+      if (this.fileSha256(target) !== (base || null)) throw new RemoteWorkspaceError('SYNC_CONFLICT', `${relative} changed after the task snapshot`)
+      seen.add(relative); total += size
+      normalized.push({ path: relative, action, base_sha256: base, final_sha256: final, size })
+    }
+    if (total > 256 * 1024 * 1024) throw new RemoteWorkspaceError('PROJECT_TOO_LARGE', 'sync change set exceeds the bounded limit')
+    const paths = [...seen].sort()
+    if (paths.some((value) => paths.some((other) => other !== value && other.startsWith(`${value}/`)))) throw new RemoteWorkspaceError('SYNC_CONFLICT', 'sync change set contains a file/directory topology change')
+    const directory = this.syncDirectory(transactionId)
+    if (fs.existsSync(directory)) throw new RemoteWorkspaceError('DESTINATION_EXISTS', 'sync transaction already exists')
+    fs.mkdirSync(path.join(directory, 'staged'), { recursive: true, mode: 0o700 })
+    fs.mkdirSync(path.join(directory, 'backup'), { mode: 0o700 })
+    const manifest = { schema: 'remote_project_sync_v1', transaction_id: transactionId, workspace_id: workspaceId, state: 'PREPARED', changes: normalized, applied: [], created_at: Date.now() / 1000 }
+    this.writeSyncJournal(directory, manifest)
+    for (const change of normalized) {
+      if (change.action === 'write' && change.size === 0) fs.closeSync(fs.openSync(path.join(directory, 'staged', this.syncFileName(change.path)), 'w', 0o600))
+    }
+    return { ok: true, transaction_id: transactionId, state: 'PREPARED', change_count: normalized.length }
+  }
+
+  syncWrite(workspaceId, args) {
+    const transactionId = String(args.transaction_id || '')
+    const relative = String(args.path || '')
+    const offset = Math.max(0, Number(args.offset || 0))
+    const encoded = String(args.content_b64 || '')
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'sync chunk is invalid')
+    const data = Buffer.from(encoded, 'base64')
+    if (!data.length || data.length > 65536 || sha256(data) !== String(args.content_sha256 || '')) throw new RemoteWorkspaceError('COMMAND_FORMAT_INVALID', 'sync chunk failed integrity validation')
+    const { directory, manifest } = this.loadSync(workspaceId, transactionId)
+    const change = manifest.changes.find((item) => item.path === relative && item.action === 'write')
+    if (!change || manifest.state !== 'PREPARED') throw new RemoteWorkspaceError('PERMISSION_DENIED', 'sync file is not prepared')
+    const staged = path.join(directory, 'staged', this.syncFileName(relative))
+    const current = fs.existsSync(staged) ? fs.statSync(staged).size : 0
+    if (!Number.isInteger(offset) || current !== offset || current + data.length > change.size) throw new RemoteWorkspaceError('SYNC_CONFLICT', 'sync chunk offset is invalid')
+    const descriptor = fs.openSync(staged, 'a', 0o600)
+    try { fs.writeSync(descriptor, data); fs.fsyncSync(descriptor) } finally { fs.closeSync(descriptor) }
+    return { ok: true, path: relative, next_offset: offset + data.length }
+  }
+
+  rollbackSync(workspaceId, directory, manifest) {
+    for (const change of [...(manifest.changes || [])].reverse()) {
+      const target = this.policy.path(workspaceId, change.path, { write: true })
+      const backup = path.join(directory, 'backup', this.syncFileName(change.path))
+      if (fs.existsSync(backup)) {
+        fs.mkdirSync(path.dirname(target), { recursive: true })
+        fs.copyFileSync(backup, target)
+      } else if (change.action === 'write' && this.fileSha256(target) === change.final_sha256) {
+        fs.rmSync(target)
+      }
+    }
+    manifest.state = 'ROLLED_BACK'
+    this.writeSyncJournal(directory, manifest)
+  }
+
+  syncCommit(workspaceId, args) {
+    const transactionId = String(args.transaction_id || '')
+    const { directory, manifest } = this.loadSync(workspaceId, transactionId)
+    if (manifest.state === 'COMMITTED') return { ok: true, transaction_id: transactionId, state: 'COMMITTED', change_count: manifest.changes.length }
+    if (manifest.state !== 'PREPARED') throw new RemoteWorkspaceError('SYNC_CONFLICT', 'sync transaction is not prepared')
+    for (const change of manifest.changes) {
+      if (change.action === 'write') {
+        const staged = path.join(directory, 'staged', this.syncFileName(change.path))
+        if (!fs.existsSync(staged) || fs.statSync(staged).size !== change.size || this.fileSha256(staged) !== change.final_sha256) throw new RemoteWorkspaceError('SYNC_CONFLICT', `${change.path} was not transferred completely`)
+      }
+      const target = this.policy.path(workspaceId, change.path, { write: true })
+      if (this.fileSha256(target) !== (change.base_sha256 || null)) throw new RemoteWorkspaceError('SYNC_CONFLICT', `${change.path} changed after the task snapshot`)
+    }
+    manifest.state = 'APPLYING'; this.writeSyncJournal(directory, manifest)
+    try {
+      for (const change of manifest.changes) {
+        const target = this.policy.path(workspaceId, change.path, { write: true })
+        const backup = path.join(directory, 'backup', this.syncFileName(change.path))
+        if (fs.existsSync(target)) fs.copyFileSync(target, backup)
+        if (change.action === 'delete') fs.rmSync(target)
+        else {
+          fs.mkdirSync(path.dirname(target), { recursive: true })
+          const temporary = path.join(path.dirname(target), `.${path.basename(target)}.work-agent-${transactionId}.tmp`)
+          fs.copyFileSync(path.join(directory, 'staged', this.syncFileName(change.path)), temporary)
+          const descriptor = fs.openSync(temporary, 'r')
+          try { fs.fsyncSync(descriptor) } finally { fs.closeSync(descriptor) }
+          fs.renameSync(temporary, target)
+        }
+        manifest.applied.push(change.path); this.writeSyncJournal(directory, manifest)
+      }
+    } catch (error) {
+      this.rollbackSync(workspaceId, directory, manifest)
+      throw new RemoteWorkspaceError('SYNC_APPLY_FAILED', 'project sync failed and was rolled back')
+    }
+    manifest.state = 'COMMITTED'; this.writeSyncJournal(directory, manifest)
+    return { ok: true, transaction_id: transactionId, state: 'COMMITTED', change_count: manifest.changes.length }
+  }
+
+  syncAbort(workspaceId, args) {
+    const transactionId = String(args.transaction_id || '')
+    const { directory, manifest } = this.loadSync(workspaceId, transactionId)
+    if (manifest.state === 'APPLYING') throw new RemoteWorkspaceError('SYNC_CONFLICT', 'applying sync cannot be aborted')
+    if (manifest.state === 'COMMITTED') return { ok: true, transaction_id: transactionId, state: 'COMMITTED' }
+    fs.rmSync(directory, { recursive: true })
+    return { ok: true, transaction_id: transactionId, state: 'ABORTED' }
+  }
+
+  recoverSyncTransactions() {
+    let root
+    try { root = this.syncRoot() } catch { return }
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const directory = path.join(root, entry.name)
+      try {
+        const manifest = JSON.parse(fs.readFileSync(path.join(directory, 'manifest.json'), 'utf8'))
+        if (manifest.state === 'APPLYING') this.rollbackSync(String(manifest.workspace_id), directory, manifest)
+        else if (manifest.state === 'COMMITTED' && Date.now() / 1000 - Number(manifest.created_at || 0) > 86400) fs.rmSync(directory, { recursive: true })
+      } catch {
+        // Retain unreadable journals for inspection; never guess at project changes.
+      }
+    }
   }
 
   write(workspaceId, args) {
