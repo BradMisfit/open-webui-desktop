@@ -167,6 +167,10 @@ export class RemoteWorkspaceClient {
     this.onStateChange = onStateChange
     this.config = this.load()
     this.policy = new WorkspacePolicy(this.config.workspaces || [])
+    // Process-scoped, never persisted: reconnects from this exact Desktop
+    // instance may replace its own ghost transport, while another process
+    // sharing the persisted device key cannot evict the active connection.
+    this.clientInstanceId = `dci_${crypto.randomUUID().replace(/-/g, '')}`
     this.processes = new Map()
     this.snapshots = new Map()
     this.socket = null
@@ -259,18 +263,36 @@ export class RemoteWorkspaceClient {
     const grant = this.addWorkspace(path.basename(selected) || 'Workspace', selected, capabilitiesForPreset(request.preset))
     this.config.endpoint = request.endpoint
     this.save()
-    // Every Browse launch needs a server-side correlation result, even when
-    // this Desktop is already enrolled and therefore authenticates instead of
-    // consuming the fresh one-time pairing code.  The pair ID is opaque to the
-    // guest and is used only by the relay to acknowledge this registration.
-    const pairing = this.config.enrolled_endpoint === request.endpoint
-      ? { helperLaunchId: request.pairId }
-      : { pairId: request.pairId, code: request.code, helperLaunchId: request.pairId }
     // The native picker is intentionally outside any transport deadline: a
     // person may take as long as needed to choose a folder.  Once selection is
     // complete, however, the relay handshake is bounded and failures are
     // returned as typed RemoteWorkspaceError values to the guest bridge.
-    await this.connect(request.endpoint, pairing)
+    if (this.config.enrolled_endpoint === request.endpoint) {
+      // Reuse the established transport. Opening a second authenticated socket
+      // here used to leave the Desktop pointing at the rejected socket while
+      // the relay retained the old one, producing a reconnect loop and dropping
+      // the first snapshot_manifest request. The fresh launch id is instead
+      // attached to this one selected workspace registration.
+      if (this.connecting) {
+        try { await this.connecting } catch {}
+      }
+      const reusedLiveSocket = Boolean(this.connected && this.socket?.readyState === 1)
+      await this.connect(
+        request.endpoint,
+        reusedLiveSocket ? {} : { helperLaunchId: request.pairId }
+      )
+      if (!this.socket || this.socket.readyState !== 1 || !this.connected) {
+        throw new RemoteWorkspaceError('CLIENT_DISCONNECTED', 'the Work Agent relay is not connected')
+      }
+      // A live socket validates the launch on this registration. A recovered
+      // socket validated it during authentication, and the relay associates
+      // subsequent registrations on that connection with the same launch.
+      this.registerWorkspace(this.socket, grant, reusedLiveSocket ? request.pairId : '')
+    } else {
+      await this.connect(request.endpoint, {
+        pairId: request.pairId, code: request.code, helperLaunchId: request.pairId
+      })
+    }
     return { cancelled: false, workspace: publicGrant(grant), ...this.publicStatus() }
   }
 
@@ -292,6 +314,7 @@ export class RemoteWorkspaceClient {
   }
 
   async connect(endpoint, pairing = {}) {
+    if (this.connected && this.socket?.readyState === 1) return
     if (this.connecting) return this.connecting
     this.connecting = this.open(endpoint, pairing).finally(() => { this.connecting = null })
     return this.connecting
@@ -299,7 +322,6 @@ export class RemoteWorkspaceClient {
 
   async open(endpoint, { pairId, code, helperLaunchId } = {}) {
     const socket = await this.connectSocket(endpoint)
-    this.socket = socket
     try {
       const challenge = await receiveJson(socket)
       if (challenge?.type !== 'challenge' || typeof challenge.nonce !== 'string') {
@@ -316,7 +338,8 @@ export class RemoteWorkspaceClient {
           display_name: this.config.display_name || this.deviceId(),
           os_name: this.platform === 'win32' ? 'windows' : 'linux', public_key: this.publicKey(),
           helper_launch_id: helperLaunchId || pairId, protocol: REMOTE_WORKSPACE_PROTOCOL,
-          client_kind: REMOTE_WORKSPACE_DESKTOP_CLIENT_KIND
+          client_kind: REMOTE_WORKSPACE_DESKTOP_CLIENT_KIND,
+          client_instance_id: this.clientInstanceId
         })
       } else {
         const nonce = Buffer.from(challenge.nonce, 'base64url')
@@ -324,7 +347,8 @@ export class RemoteWorkspaceClient {
           type: 'authenticate', device_id: this.deviceId(),
           signature: base64url(crypto.sign(null, nonce, this.ensureKey())),
           helper_launch_id: helperLaunchId, protocol: REMOTE_WORKSPACE_PROTOCOL,
-          client_kind: REMOTE_WORKSPACE_DESKTOP_CLIENT_KIND
+          client_kind: REMOTE_WORKSPACE_DESKTOP_CLIENT_KIND,
+          client_instance_id: this.clientInstanceId
         })
       }
       const authenticated = await receiveJson(socket)
@@ -344,25 +368,37 @@ export class RemoteWorkspaceClient {
         this.config.endpoint = endpoint
         this.save()
       }
+      const previous = this.socket
+      this.socket = socket
+      if (previous && previous !== socket && previous.readyState === 1) {
+        previous.onclose = null
+        try { previous.close() } catch {}
+      }
       this.connected = true
       this.reconnectDelay = this.reconnectBaseMs
       this.onStateChange(this.publicStatus())
-      for (const grant of this.policy.grants.values()) {
-        const capabilities = {
-          ...grant.capabilities,
-          remote_project_v1: Boolean(grant.capabilities?.read),
-          coding_environment_v1: Boolean(grant.capabilities?.write && grant.capabilities?.execute)
-        }
-        sendJson(socket, { type: 'workspace_register', ...grant, capabilities })
-      }
+      for (const grant of this.policy.grants.values()) this.registerWorkspace(socket, grant)
       this.listen(socket, endpoint)
       this.startHeartbeat(socket, endpoint)
     } catch (error) {
-      this.connected = false
-      this.onStateChange(this.publicStatus())
+      if (this.socket === socket) this.socket = null
+      this.connected = Boolean(this.socket?.readyState === 1)
+      if (!this.connected) this.onStateChange(this.publicStatus())
       try { socket.close() } catch {}
       throw error
     }
+  }
+
+  registerWorkspace(socket, grant, helperLaunchId = '') {
+    const capabilities = {
+      ...grant.capabilities,
+      remote_project_v1: Boolean(grant.capabilities?.read),
+      coding_environment_v1: Boolean(grant.capabilities?.write && grant.capabilities?.execute)
+    }
+    sendJson(socket, {
+      type: 'workspace_register', ...grant, capabilities,
+      ...(helperLaunchId ? { helper_launch_id: helperLaunchId } : {})
+    })
   }
 
   assertProtocol(serverProtocol) {
@@ -388,7 +424,11 @@ export class RemoteWorkspaceClient {
       sendJson(socket, { type: 'result', request_id: message.request_id, result })
     }
     socket.onclose = () => {
-      if (this.socket === socket) this.stopHeartbeat()
+      if (this.socket !== socket) return
+      this.socket = null
+      this.connected = false
+      this.stopHeartbeat()
+      this.onStateChange(this.publicStatus())
       this.scheduleReconnect(endpoint)
     }
     socket.onerror = () => undefined

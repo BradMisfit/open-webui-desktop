@@ -216,11 +216,13 @@ test('a saved unpaired device ID retries pair rather than attempting authenticat
   assert.equal(frames[0].type, 'pair')
 })
 
-test('an enrolled Desktop authenticates a fresh Browse launch with its correlation ID', async () => {
+test('an enrolled Desktop reuses a live socket and recovers a disconnected Browse launch', async () => {
   const root = temporaryRoot()
   const configPath = path.join(root, 'config.json')
   const frames = []
+  let socketCount = 0
   const socket = {
+    readyState: 1,
     onmessage: null,
     send(frame) {
       frames.push(JSON.parse(frame))
@@ -237,6 +239,7 @@ test('an enrolled Desktop authenticates a fresh Browse launch with its correlati
   const client = new PickerClient({
     configPath,
     connectSocket: async () => {
+      socketCount += 1
       setTimeout(() => socket.onmessage?.({ data: JSON.stringify({ type: 'challenge', nonce: Buffer.alloc(32).toString('base64url'), protocol: REMOTE_WORKSPACE_PROTOCOL }) }), 0)
       return socket
     }
@@ -244,9 +247,26 @@ test('an enrolled Desktop authenticates a fresh Browse launch with its correlati
   client.deviceId()
   client.config.enrolled_endpoint = 'wss://work.example.test/v1/remote-workspaces/client/connect'
   client.save()
+  await client.connect(client.config.enrolled_endpoint)
+  frames.length = 0
   await client.browse({ launch_url: launch() })
+  assert.equal(socketCount, 1)
+  assert.equal(frames.length, 1)
+  assert.equal(frames[0].type, 'workspace_register')
+  assert.equal(frames[0].helper_launch_id, 'rwp_' + 'a'.repeat(32))
+  assert.equal(frames[0].workspace_id, client.publicStatus().workspaces[0].workspace_id)
+
+  socket.readyState = 3
+  socket.onclose()
+  socket.readyState = 1
+  frames.length = 0
+  await client.browse({ launch_url: launch() })
+  assert.equal(socketCount, 2)
   assert.equal(frames[0].type, 'authenticate')
   assert.equal(frames[0].helper_launch_id, 'rwp_' + 'a'.repeat(32))
+  assert.equal(frames.at(-1).type, 'workspace_register')
+  assert.equal(frames.at(-1).workspace_id, client.publicStatus().workspaces[0].workspace_id)
+  client.stopHeartbeat()
 })
 
 test('workspace bridge failures return a bounded typed response to the guest', () => {
