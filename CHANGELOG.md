@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.9] - 2026-10-04
+
+### Fixed
+
+- Synced Folder browsing reuses the authenticated Desktop relay instead of
+  opening a competing socket that can disconnect the first snapshot request.
+- Desktop reconnect ownership is process-scoped, failed candidate connections
+  cannot replace the working socket, and stale close events no longer trigger
+  reconnect loops.
+
 ## [0.0.22-bradmisfit.8] - 2026-10-04
 
 ### Fixed

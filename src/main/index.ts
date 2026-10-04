@@ -87,7 +87,7 @@ import {
 } from './utils/huggingface'
 
 import { initUpdater, checkForUpdates, downloadUpdate, installUpdate } from './updater'
-import { createDesktopRemoteWorkspaceService } from './remote-workspace'
+import { createDesktopRemoteWorkspaceService, REMOTE_WORKSPACE_PROTOCOL } from './remote-workspace'
 import { getScope, setScope } from './security/scope'
 import {
   installCapture,
@@ -1624,7 +1624,7 @@ if (!gotTheLock) {
       }
     })
     ipcMain.handle('workspace:status', () => remoteWorkspaceService?.publicStatus() ?? {
-      protocol: 1, device_id: null, connected: false, workspaces: []
+      protocol: REMOTE_WORKSPACE_PROTOCOL, device_id: null, connected: false, workspaces: []
     })
     ipcMain.handle('workspace:location', (_event, request: { workspace_id?: string } = {}) => {
       if (!remoteWorkspaceService) return workspaceBridgeFailure('DESKTOP_WORKSPACE_UNAVAILABLE')

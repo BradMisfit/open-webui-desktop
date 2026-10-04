@@ -14,7 +14,7 @@ source mirror.
   `0.0.21-bradmisfit.1`.
 
 The source commit and Remote Workspace protocol revision are uploaded as
-`release-provenance.json` with each release. The current target protocol is 1.
+`release-provenance.json` with each release. The current target protocol is 2.
 
 ## Controlled release procedure
 

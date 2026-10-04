@@ -101,12 +101,15 @@ test('custom version selection resolves only our controlled public release asset
 
 test('release workflow is manual, validates artifacts, and publishes only a draft to the controlled feed', () => {
   const workflow = read('.github/workflows/release.yml')
+  const releaseDocs = read('CUSTOM-RELEASES.md')
   assert.match(workflow, /workflow_dispatch:/)
   assert.match(workflow, /create_draft_release:/)
   assert.match(workflow, /repository:\s*BradMisfit\/open-webui-desktop/)
   assert.match(workflow, /GITHUB_TOKEN:\s*\$\{\{ secrets\.RELEASE_FEED_TOKEN \}\}/)
   assert.match(workflow, /verify-updater-release\.mjs/)
   assert.match(workflow, /draft:\s*true/)
+  assert.match(workflow, /"remote_workspace_protocol": 2/)
+  assert.match(releaseDocs, /current target protocol is 2/)
   assert.doesNotMatch(workflow, /repository:\s*open-webui\/desktop/)
 })
 
@@ -123,5 +126,7 @@ test('Remote Workspace bridge and protocol compatibility remain isolated from up
   assert.match(content, /'github:authorize-device': \(request\) => window\.electronAPI\.githubAuthorizeDevice/)
   assert.doesNotMatch(main, /github:authorize-device[\s\S]{0,400}openExternal\(url\)/)
   assert.match(core, /DESKTOP_UPDATE_REQUIRED/)
+  assert.match(main, /protocol: REMOTE_WORKSPACE_PROTOCOL/)
+  assert.doesNotMatch(main, /protocol: 1, device_id/)
   assert.doesNotMatch(preload, /workspace[A-Za-z]*:\s*\([^)]*path/)
 })

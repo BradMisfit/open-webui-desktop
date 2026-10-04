@@ -426,7 +426,7 @@ jobs:
                     "application": "Open WebUI Desktop",
                     "version": "${{ steps.version.outputs.version }}",
                     "source_commit": "${{ github.sha }}",
-                    "remote_workspace_protocol": 1,
+                    "remote_workspace_protocol": 2,
                     "app_id": "com.openwebui.desktop"
                   }
                   EOF
