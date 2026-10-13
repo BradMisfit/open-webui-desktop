@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.22-bradmisfit.10] - 2026-10-13
+
+### Fixed
+
+- Reissues the process-scoped Synced Folder client after the matching server
+  reconnect support was restored, so existing `.9` installations receive a
+  fresh updater notification and restart cleanly against the corrected relay.
+
 ## [0.0.22-bradmisfit.9] - 2026-10-04
 
 ### Fixed
