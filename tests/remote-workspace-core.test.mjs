@@ -135,6 +135,42 @@ test('Synced Folder snapshot and transactional copy-back use the advertised prot
   assert.equal(fs.readFileSync(path.join(root, 'src', 'app.py'), 'utf8'), 'after\n')
 })
 
+test('transaction durability never flushes a read-only handle', async () => {
+  const root = temporaryRoot()
+  const configRoot = temporaryRoot()
+  const client = new RemoteWorkspaceClient({ configPath: path.join(configRoot, 'config.json') })
+  const grant = client.addWorkspace('Project', root, capabilitiesForPreset('developer'))
+  const originalOpen = fs.openSync
+  const originalFsync = fs.fsyncSync
+  const accessByDescriptor = new Map()
+  fs.openSync = (...args) => {
+    const descriptor = originalOpen(...args)
+    accessByDescriptor.set(descriptor, args[1])
+    return descriptor
+  }
+  fs.fsyncSync = (descriptor) => {
+    assert.notEqual(accessByDescriptor.get(descriptor), 'r', 'Windows rejects FlushFileBuffers on a read-only handle')
+    return originalFsync(descriptor)
+  }
+  try {
+    const content = Buffer.from('created on the server\n')
+    const transactionId = 'b'.repeat(32)
+    await client.operation(grant.workspace_id, 'sync_begin', {
+      transaction_id: transactionId,
+      changes: [{ path: 'created.txt', action: 'write', base_sha256: '', final_sha256: sha256ForTest(content), size: content.length }]
+    }, 30)
+    await client.operation(grant.workspace_id, 'sync_write', {
+      transaction_id: transactionId, path: 'created.txt', offset: 0,
+      content_b64: content.toString('base64'), content_sha256: sha256ForTest(content)
+    }, 30)
+    await client.operation(grant.workspace_id, 'sync_commit', { transaction_id: transactionId }, 30)
+    assert.equal(fs.readFileSync(path.join(root, 'created.txt'), 'utf8'), 'created on the server\n')
+  } finally {
+    fs.openSync = originalOpen
+    fs.fsyncSync = originalFsync
+  }
+})
+
 test('Desktop pair and reconnect frames identify the protocol-bearing client', async () => {
   const configPath = path.join(temporaryRoot(), 'config.json')
   const frames = []

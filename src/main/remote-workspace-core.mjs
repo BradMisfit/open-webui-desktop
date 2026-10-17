@@ -653,7 +653,10 @@ export class RemoteWorkspaceClient {
     const temporary = path.join(directory, 'manifest.tmp')
     const target = path.join(directory, 'manifest.json')
     fs.writeFileSync(temporary, JSON.stringify(manifest), { encoding: 'utf8', mode: 0o600 })
-    const descriptor = fs.openSync(temporary, 'r')
+    // FlushFileBuffers on Windows requires a write-capable handle. Opening the
+    // just-written journal read-only works on POSIX, but throws before the
+    // transaction can be prepared on Windows.
+    const descriptor = fs.openSync(temporary, 'r+')
     try { fs.fsyncSync(descriptor) } finally { fs.closeSync(descriptor) }
     fs.renameSync(temporary, target)
   }
@@ -764,7 +767,8 @@ export class RemoteWorkspaceClient {
           fs.mkdirSync(path.dirname(target), { recursive: true })
           const temporary = path.join(path.dirname(target), `.${path.basename(target)}.work-agent-${transactionId}.tmp`)
           fs.copyFileSync(path.join(directory, 'staged', this.syncFileName(change.path)), temporary)
-          const descriptor = fs.openSync(temporary, 'r')
+          // Keep the handle write-capable for Windows FlushFileBuffers.
+          const descriptor = fs.openSync(temporary, 'r+')
           try { fs.fsyncSync(descriptor) } finally { fs.closeSync(descriptor) }
           fs.renameSync(temporary, target)
         }
